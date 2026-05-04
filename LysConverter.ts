@@ -9,8 +9,40 @@ import { LysData } from './converter/types';
 
 export class LysConverter {
 
+  private static summarizeConvertedData(data: DragonfruitImportFormat) {
+    return {
+      roots: data.roots?.length ?? 0,
+      trunks: data.trunks?.length ?? 0,
+      branches: data.branches?.length ?? 0,
+      leaves: data.leaves?.length ?? 0,
+      twigs: data.twigs?.length ?? 0,
+      sticks: data.sticks?.length ?? 0,
+      braces: data.braces?.length ?? 0,
+      knots: data.knots?.length ?? 0,
+      kickstands: data.kickstands?.length ?? 0,
+    };
+  }
+
+  private static collectModelIds(data: DragonfruitImportFormat): string[] {
+    const ids = new Set<string>();
+    for (const root of data.roots || []) if (root?.modelId) ids.add(root.modelId);
+    for (const trunk of data.trunks || []) if (trunk?.modelId) ids.add(trunk.modelId);
+    for (const branch of data.branches || []) if (branch?.modelId) ids.add(branch.modelId);
+    for (const leaf of data.leaves || []) if (leaf?.modelId) ids.add(leaf.modelId);
+    for (const twig of data.twigs || []) if (twig?.modelId) ids.add(twig.modelId);
+    for (const stick of data.sticks || []) if (stick?.modelId) ids.add(stick.modelId);
+    for (const brace of data.braces || []) if (brace?.modelId) ids.add(brace.modelId);
+    for (const kickstandBuild of data.kickstands || []) {
+      if (kickstandBuild?.root?.modelId) ids.add(kickstandBuild.root.modelId);
+      if (kickstandBuild?.kickstand?.modelId) ids.add(kickstandBuild.kickstand.modelId);
+    }
+    return [...ids];
+  }
+
   static reassignModelId(data: DragonfruitImportFormat, modelId: string): void {
     if (!modelId) return;
+
+    const beforeModelIds = this.collectModelIds(data);
 
     for (const root of data.roots) root.modelId = modelId;
     for (const trunk of data.trunks) trunk.modelId = modelId;
@@ -23,6 +55,13 @@ export class LysConverter {
       kickstandBuild.root.modelId = modelId;
       kickstandBuild.kickstand.modelId = modelId;
     }
+
+    console.log('[LysConverter][debug] reassignModelId', {
+      targetModelId: modelId,
+      beforeModelIds,
+      afterModelIds: this.collectModelIds(data),
+      supportSummary: this.summarizeConvertedData(data),
+    });
   }
 
   static applyWorldXYPlacement(data: DragonfruitImportFormat, offsetX: number, offsetY: number): void {
@@ -122,7 +161,24 @@ export class LysConverter {
   }
 
   static convert(data: LysData, settings: SupportSettings, mesh?: THREE.Mesh): DragonfruitImportFormat {
-    return convertLysData(data, settings, mesh);
+    const objectIds = Object.keys((data as any)?.objects?.present?.byId ?? {});
+    const supportIds = Object.keys((data as any)?.supports?.present?.byId ?? {});
+
+    console.log('[LysConverter][debug] convert:start', {
+      objectCount: objectIds.length,
+      objectIds,
+      supportCount: supportIds.length,
+      meshVertexCount: mesh?.geometry?.getAttribute('position')?.count ?? null,
+    });
+
+    const converted = convertLysData(data, settings, mesh);
+
+    console.log('[LysConverter][debug] convert:done', {
+      outputSummary: this.summarizeConvertedData(converted),
+      outputModelIds: this.collectModelIds(converted),
+    });
+
+    return converted;
   }
 
   /**

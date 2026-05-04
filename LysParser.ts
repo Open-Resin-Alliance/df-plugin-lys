@@ -6,6 +6,8 @@ const DEFAULT_APP_ID = "a8ee1146-8d03-4b69-8a67-59009a3f9ee7";
 
 export interface LysData {
     geometry: THREE.BufferGeometry;
+    /** All geometry blobs parsed from the .lys archive, keyed by filename stem (e.g. "o15" for "o15.bin"). */
+    geometriesByName: Map<string, THREE.BufferGeometry>;
     sceneData: any; // Decoded MessagePack data
 }
 
@@ -50,6 +52,8 @@ export class LysParser {
         let sceneBlob: Uint8Array | null = null;
         let geomBlob: Uint8Array | null = null;
         let largestBinSize = 0;
+        // All non-scene .bin blobs keyed by their filename stem (e.g. "o15" from "o15.bin")
+        const allGeomBlobs = new Map<string, Uint8Array>();
 
         // 2. Locate Files in Blob
         for (const [fname, info] of Object.entries(filesInfo) as [string, any][]) {
@@ -71,10 +75,15 @@ export class LysParser {
                 }
                 sceneBlob = data.subarray(absOffset, absOffset + size);
             } else if (name.endsWith('.bin')) {
-                // Heuristic: The largest .bin file that isn't scene.bin is the geometry
+                const blob = data.subarray(absOffset, absOffset + size);
+                // Stem = filename without .bin extension (case-preserved from original fname)
+                const stem = fname.slice(0, fname.length - 4);
+                allGeomBlobs.set(stem, blob);
+                allGeomBlobs.set(stem.toLowerCase(), blob); // also register lowercase for easy lookup
+
                 if (size > largestBinSize) {
                     largestBinSize = size;
-                    geomBlob = data.subarray(absOffset, absOffset + size);
+                    geomBlob = blob;
                 }
             }
         }
@@ -118,15 +127,32 @@ export class LysParser {
         }
 
         // 4. Parse Geometry
-        // We pass the raw ArrayBuffer slice for DataView access
-        // Note: geomBlob is a Uint8Array, .buffer refers to the whole file buffer if it's a subarray
-        // We need to slice it to get a clean buffer for parsing if we use offset=0 logic, 
-        // OR we just pass the subarray and carefully use offsets.
-        // Let's create a copy to be safe and simple for the parser
+        // Parse the largest blob as the fallback single geometry (backward compat).
+        // Also parse all blobs into a map keyed by filename stem for multi-model support.
         const geometry = this.parseGeometry(geomBlob!.slice().buffer);
+
+        const geometriesByName = new Map<string, THREE.BufferGeometry>();
+        for (const [stem, blob] of allGeomBlobs) {
+            // Avoid parsing the same blob twice if both lower/original cases were stored
+            if (geometriesByName.has(stem)) continue;
+            try {
+                geometriesByName.set(stem, this.parseGeometry(blob.slice().buffer));
+            } catch (err) {
+                console.warn(`[LysParser] Failed to parse geometry for "${stem}":`, err);
+            }
+        }
+
+        const sceneObjectIds = Object.keys(sceneData?.objects?.present?.byId ?? {});
+        console.log('[LysParser][debug] parse summary', {
+            sceneObjectCount: sceneObjectIds.length,
+            sceneObjectIds,
+            geometryStemCount: geometriesByName.size,
+            geometryStems: [...geometriesByName.keys()],
+        });
 
         return {
             geometry,
+            geometriesByName,
             sceneData
         };
     }
