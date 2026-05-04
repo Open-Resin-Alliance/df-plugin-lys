@@ -138,10 +138,8 @@ export function convertLysData(data: LysData, settings: SupportSettings, mesh?: 
     };
 
     const transformRootBasePoint = (v: { x: number; y: number; z: number }): THREE.Vector3 => {
-      const p = new THREE.Vector3(v.x, v.y, 0);
-      p.x *= objectScale.x;
-      p.y *= objectScale.y;
-      return p;
+      // Support roots are authored in post-scale world XY space; do not re-apply object scale.
+      return new THREE.Vector3(v.x, v.y, 0);
     };
 
     const rootDefaults = settings.roots;
