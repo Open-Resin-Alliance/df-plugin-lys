@@ -356,6 +356,17 @@ export function useLysImport() {
                 if (dragonfruitData) {
                     LysConverter.reassignModelId(dragonfruitData, importedModelId);
 
+                    // Apply Z rotation as a post-conversion world-space transform so that all
+                    // support coordinates land in their correct rotated positions.
+                    // The conversion ran with Z-stripped rotation, so this is equivalent to
+                    // what the gizmo does via transformSupportsForModel when rotating a supported model.
+                    const objPos = targetObj?.position ?? { x: 0, y: 0, z: 0 };
+                    const rotZDeg = Number.isFinite(targetObj?.rotation?.z) ? (targetObj!.rotation!.z as number) : 0;
+                    if (Math.abs(rotZDeg) > 1e-6) {
+                        LysConverter.applyZRotation(dragonfruitData, objPos.x, objPos.y, rotZDeg * Math.PI / 180);
+                        console.log(`[useLysImport] Applied Z rotation: ${rotZDeg.toFixed(3)}°`);
+                    }
+
                     if (Math.abs(importCenterX) > 1e-6 || Math.abs(importCenterY) > 1e-6) {
                         // Canonical XY shift (includes roots, braces, kickstands, joints, knots, etc.)
                         LysConverter.applyWorldXYPlacement(dragonfruitData, importCenterX, importCenterY);
@@ -369,13 +380,6 @@ export function useLysImport() {
                 if (targetObj) {
                     console.log("[useLysImport] Target Object Found:", targetObj);
 
-                    // Apply Center (Pivot Offset) - REMOVED for now as it might be interfering with simple position
-                    // if (targetObj.center) {
-                    //     const { x, y, z } = targetObj.center;
-                    //     console.log(`[useLysImport] Applying Center Offset: ${x}, ${y}, ${z}`);
-                    //     data.geometry.translate(x, y, z);
-                    // }
-
                     if (targetObj.position) {
                         const finalModelZ = Number.isFinite(resolvedModelZ) ? (resolvedModelZ as number) : targetObj.position.z;
                         lysTransform.position.set(targetObj.position.x + importCenterX, targetObj.position.y + importCenterY, finalModelZ);
@@ -385,14 +389,18 @@ export function useLysImport() {
                         }
                     }
                     if (targetObj.rotation) {
-                        const normalizedRotation = normalizeLysRotation(targetObj.rotation);
+                        // X/Y rotation was applied during conversion; Z was stripped and applied
+                        // post-conversion via applyZRotation above. Return the full rotation so
+                        // the scene manager positions the mesh correctly.
+                        const rXY = normalizeLysRotation(targetObj.rotation);
+                        const rotZDeg = Number.isFinite(targetObj.rotation.z) ? (targetObj.rotation.z as number) : 0;
                         lysTransform.rotation.copy(eulerFromGlobalEuler({
-                            x: normalizedRotation.x * Math.PI / 180,
-                            y: normalizedRotation.y * Math.PI / 180,
-                            z: normalizedRotation.z * Math.PI / 180,
+                            x: rXY.x * Math.PI / 180,
+                            y: rXY.y * Math.PI / 180,
+                            z: rotZDeg * Math.PI / 180,
                         }));
                         console.log(`[useLysImport] Extracted Rotation (Deg): ${targetObj.rotation.x}, ${targetObj.rotation.y}, ${targetObj.rotation.z}`);
-                        console.log(`[useLysImport] Applied Rotation (Deg): ${normalizedRotation.x}, ${normalizedRotation.y}, ${normalizedRotation.z}`);
+                        console.log(`[useLysImport] Applied Rotation (Deg): ${rXY.x}, ${rXY.y}, ${rotZDeg}`);
                     }
                     if (targetObj.scale) {
                         lysTransform.scale.set(targetObj.scale.x, targetObj.scale.y, targetObj.scale.z);

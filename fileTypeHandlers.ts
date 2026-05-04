@@ -239,6 +239,19 @@ export async function importLysFile(
     if (dragonfruitData) {
       LysConverter.reassignModelId(dragonfruitData, importedModelId);
 
+      // Apply Z rotation as a post-conversion world-space transform so that all
+      // support coordinates (roots, joints, contacts, normals) land in their
+      // correct rotated positions.  The conversion itself ran with Z-stripped
+      // rotation (normalizeLysRotation), so supports are in "unrotated" object
+      // space at this point; rotating them here is equivalent to what the gizmo
+      // does via transformSupportsForModel when the user rotates a supported model.
+      const objPos = targetObj?.position ?? { x: 0, y: 0, z: 0 };
+      const rotZDeg = Number.isFinite(targetObj?.rotation?.z) ? (targetObj!.rotation!.z as number) : 0;
+      if (Math.abs(rotZDeg) > 1e-6) {
+        LysConverter.applyZRotation(dragonfruitData, objPos.x, objPos.y, rotZDeg * Math.PI / 180);
+        console.log(`[lys-import] Applied Z rotation: ${rotZDeg.toFixed(3)}°`);
+      }
+
       if (Math.abs(importCenterX) > 1e-6 || Math.abs(importCenterY) > 1e-6) {
         LysConverter.applyWorldXYPlacement(dragonfruitData, importCenterX, importCenterY);
       }
@@ -258,11 +271,15 @@ export async function importLysFile(
       );
 
       if (targetObj.rotation) {
-        const r = normalizeLysRotation(targetObj.rotation);
+        // X/Y rotation was applied during conversion; Z was stripped and applied
+        // post-conversion via applyZRotation above.  Return the full rotation so
+        // the scene manager positions the mesh correctly.
+        const rXY = normalizeLysRotation(targetObj.rotation);
+        const rotZDeg = Number.isFinite(targetObj.rotation.z) ? (targetObj.rotation.z as number) : 0;
         transform.rotation.copy(eulerFromGlobalEuler({
-          x: r.x * Math.PI / 180,
-          y: r.y * Math.PI / 180,
-          z: r.z * Math.PI / 180,
+          x: rXY.x * Math.PI / 180,
+          y: rXY.y * Math.PI / 180,
+          z: rotZDeg * Math.PI / 180,
         }));
       }
 
