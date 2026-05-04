@@ -245,6 +245,207 @@ describe('LysConverter', () => {
             'Terminal explicit base-side attach should preserve authored base-clamp knot Z');
     });
 
+    it('should keep leaf-like terminal base-clamped children projected to host (no floating leaf knot)', () => {
+        const BASE_CLAMP_LEAFLIKE_DATA = {
+            objects: {
+                present: {
+                    byId: {
+                        o1: {
+                            id: 'o1',
+                            formerCenter: { x: 0, y: 0, z: 0 },
+                            position: { x: 0, y: 0, z: 0 },
+                            rotation: { x: 0, y: 0, z: 0 },
+                            scale: { x: 1, y: 1, z: 1 },
+                        }
+                    }
+                }
+            },
+            supports: {
+                present: {
+                    byId: {
+                        s_root: {
+                            id: 's_root',
+                            type: 1,
+                            mini: false,
+                            base: { x: 0, y: 0, z: 0 },
+                            tip: { x: 0, y: 0, z: 20 },
+                            parentId: [],
+                            objectIdTip: 'o1',
+                            objectIdBase: 'o1',
+                            settings: {
+                                base: { joinDiameter: 1.0 },
+                                tip: { diameter: 0.8, length: 2.0 },
+                            },
+                        },
+                        s_child_leaflike: {
+                            id: 's_child_leaflike',
+                            type: 1,
+                            mini: false,
+                            base: { x: 0, y: 0, z: 0.20344101267939063 },
+                            // Short support (distance ~= 2.006) with tip length=2.0 -> leaf-like shaft length <= 0.2
+                            tip: { x: 0.15, y: 0, z: 2.204 },
+                            parentId: ['s_root'],
+                            parentBaseId: 's_root',
+                            parentTipId: null,
+                            objectIdTip: 'o1',
+                            objectIdBase: 'o1',
+                            settings: {
+                                base: { joinDiameter: 0.7 },
+                                tip: { diameter: 0.5, length: 2.0 },
+                            },
+                        },
+                    }
+                }
+            }
+        };
+
+        const result = LysConverter.convert(BASE_CLAMP_LEAFLIKE_DATA as any, createDefaultSettings());
+        assert.strictEqual(result.leaves.length, 1, 'Expected leaf-like child to import as leaf');
+
+        const leaf = result.leaves[0];
+        const knot = result.knots.find((k) => k.id === leaf.parentKnotId);
+        assert.ok(knot, 'Expected leaf parent knot for leaf-like terminal child');
+
+        // Should stay projected to host (around trunk first-segment start z=2), not preserved at z~0.203.
+        assert.ok(Math.abs((knot?.pos.z ?? 0) - 2) < 1e-3,
+            'Leaf-like terminal base-clamped child should keep projected host knot Z to avoid floating leaf knots');
+    });
+
+    it('should preserve leaf-like terminal base-clamped authored attach when Z drift is small', () => {
+        const BASE_CLAMP_LEAFLIKE_SMALL_Z_DATA = {
+            objects: {
+                present: {
+                    byId: {
+                        o1: {
+                            id: 'o1',
+                            formerCenter: { x: 0, y: 0, z: 0 },
+                            position: { x: 0, y: 0, z: 0 },
+                            rotation: { x: 0, y: 0, z: 0 },
+                            scale: { x: 1, y: 1, z: 1 },
+                        }
+                    }
+                }
+            },
+            supports: {
+                present: {
+                    byId: {
+                        s_root: {
+                            id: 's_root',
+                            type: 1,
+                            mini: false,
+                            base: { x: 0, y: 0, z: 0 },
+                            tip: { x: 0, y: 0, z: 20 },
+                            parentId: [],
+                            objectIdTip: 'o1',
+                            objectIdBase: 'o1',
+                            settings: {
+                                base: { joinDiameter: 1.0 },
+                                tip: { diameter: 0.8, length: 2.0 },
+                            },
+                        },
+                        s_child_leaflike_small_z: {
+                            id: 's_child_leaflike_small_z',
+                            type: 1,
+                            mini: false,
+                            // Base-clamp with large XY delta but small Z delta to host start (~2.0)
+                            base: { x: 0.9, y: 0.7, z: 1.93 },
+                            // Keep support leaf-like: endpoint distance close to tip length
+                            tip: { x: 1.05, y: 0.7, z: 3.93 },
+                            parentId: ['s_root'],
+                            parentBaseId: 's_root',
+                            parentTipId: null,
+                            objectIdTip: 'o1',
+                            objectIdBase: 'o1',
+                            settings: {
+                                base: { joinDiameter: 0.7 },
+                                tip: { diameter: 0.5, length: 2.0 },
+                            },
+                        },
+                    }
+                }
+            }
+        };
+
+        const result = LysConverter.convert(BASE_CLAMP_LEAFLIKE_SMALL_Z_DATA as any, createDefaultSettings());
+        assert.strictEqual(result.leaves.length, 1, 'Expected leaf-like child to import as leaf');
+
+        const leaf = result.leaves[0];
+        const knot = result.knots.find((k) => k.id === leaf.parentKnotId);
+        assert.ok(knot, 'Expected leaf parent knot for leaf-like small-Z-drift child');
+
+        assert.ok(Math.abs((knot?.pos.z ?? 0) - 1.93) < 1e-6,
+            'Leaf-like base clamp with small Z drift should preserve authored attach Z');
+        assert.ok(Math.abs((knot?.pos.x ?? 0) - 0.9) < 1e-6,
+            'Leaf-like base clamp with small Z drift should preserve authored attach X');
+    });
+
+    it('should not let explicit endpoint-ordering fallback override deliberate projected base clamp', () => {
+        const BASE_CLAMP_ORDERING_GUARD_DATA = {
+            objects: {
+                present: {
+                    byId: {
+                        o1: {
+                            id: 'o1',
+                            formerCenter: { x: 0, y: 0, z: 0 },
+                            position: { x: 0, y: 0, z: 0 },
+                            rotation: { x: 0, y: 0, z: 0 },
+                            scale: { x: 1, y: 1, z: 1 },
+                        }
+                    }
+                }
+            },
+            supports: {
+                present: {
+                    byId: {
+                        s_root: {
+                            id: 's_root',
+                            type: 1,
+                            mini: false,
+                            base: { x: 0, y: 0, z: 0 },
+                            tip: { x: 0, y: 0, z: 20 },
+                            parentId: [],
+                            objectIdTip: 'o1',
+                            objectIdBase: 'o1',
+                            settings: {
+                                base: { joinDiameter: 1.0 },
+                                tip: { diameter: 0.8, length: 2.0 },
+                            },
+                        },
+                        s_child_ordering_guard: {
+                            id: 's_child_ordering_guard',
+                            type: 1,
+                            mini: false,
+                            // Mimics s85-like case: base clamped to host start (~z=2), large delta,
+                            // leaf-like geometry and tip below projected knot cause ordering sign flip.
+                            base: { x: 0.9, y: 0.7, z: 0.20344101267939063 },
+                            tip: { x: 1.05, y: 0.7, z: 1.2 },
+                            parentId: ['s_root'],
+                            parentBaseId: 's_root',
+                            parentTipId: null,
+                            objectIdTip: 'o1',
+                            objectIdBase: 'o1',
+                            settings: {
+                                base: { joinDiameter: 0.7 },
+                                tip: { diameter: 0.5, length: 2.0 },
+                            },
+                        },
+                    }
+                }
+            }
+        };
+
+        const result = LysConverter.convert(BASE_CLAMP_ORDERING_GUARD_DATA as any, createDefaultSettings());
+        assert.strictEqual(result.leaves.length, 1, 'Expected ordering-guard fixture to import as leaf');
+
+        const leaf = result.leaves[0];
+        const knot = result.knots.find((k) => k.id === leaf.parentKnotId);
+        assert.ok(knot, 'Expected leaf parent knot in ordering-guard fixture');
+
+        // Must remain projected to host start, not overridden back to authored base by ordering fallback.
+        assert.ok(Math.abs((knot?.pos.z ?? 0) - 2) < 1e-3,
+            'Endpoint-ordering fallback should not override deliberate projected base clamp knot position');
+    });
+
     it('should fall back to parentBaseId/parentTipId host when explicit parentId is stale', () => {
         const STALE_PARENT_ID_DATA = {
             objects: {

@@ -548,13 +548,23 @@ export function convertLysData(data: LysData, settings: SupportSettings, mesh?: 
         const hasLargeAttachDelta = authoredAttachDeltaMm > 0.5;
         const isSupportWithChildren = hasChildren(id);
         const shouldDebugEndpointClamp = authoredAttachDeltaMm > 1.0;
+        const tipSettingsForAttach = pickContactTipSettings(s);
+        const tipLenForAttach = tipSettingsForAttach?.length || tipDefaults.lengthMm;
+        const authoredTotalDist = endpointRoles.attachPoint.distanceTo(endpointRoles.tipPoint);
+        const authoredShaftLength = authoredTotalDist - tipLenForAttach;
+        const isLikelyLeafLike = isMiniSupport(s) || authoredShaftLength <= 0.2;
+        const authoredAttachDeltaZ = Math.abs(endpointRoles.attachPoint.z - endpointRoles.attachProjection.pointOnLine.z);
         // When projection clamps to shaft TIP (t>=0.98 with significant error), the authored attach
         // point typically lies on the parent contact cone -- valid in LycheeSlicer full base-to-tip
         // range but outside DragonFruit socketJoint boundary. Use authored position for fidelity.
         // For base-side clamps, preserve authored position only for terminal supports (no children)
         // where explicit endpoint hints indicate endpoint intent.
         const isClampedToShaftTip = attachT >= 0.98 && hasLargeAttachDelta;
-        const isClampedToShaftBaseTerminal = attachT <= 0.02 && hasLargeAttachDelta && !isSupportWithChildren;
+        const isClampedToShaftBaseTerminal =
+          attachT <= 0.02
+          && hasLargeAttachDelta
+          && !isSupportWithChildren
+          && (!isLikelyLeafLike || authoredAttachDeltaZ <= 0.5);
         const preserveAuthoredAttachPoint =
           endpointRoles.usedExplicitParentHint
           && (authoredAttachDeltaMm <= 0.5 || isClampedToShaftTip || isClampedToShaftBaseTerminal);
@@ -575,6 +585,9 @@ export function convertLysData(data: LysData, settings: SupportSettings, mesh?: 
             projectedPoint: endpointRoles.attachProjection.pointOnLine,
             usedExplicitParentHint: endpointRoles.usedExplicitParentHint,
             preserveAuthoredAttachPoint,
+            isLikelyLeafLike,
+            isSupportWithChildren,
+            authoredAttachDeltaZ,
           });
         }
 
@@ -582,7 +595,10 @@ export function convertLysData(data: LysData, settings: SupportSettings, mesh?: 
           ? { x: endpointRoles.attachPoint.x, y: endpointRoles.attachPoint.y, z: endpointRoles.attachPoint.z }
           : endpointRoles.attachProjection.pointOnLine;
 
-        if (endpointRoles.usedExplicitParentHint) {
+        // Keep explicit endpoint-side ordering fallback only when we are already preserving authored
+        // endpoint intent, or when projection is not endpoint-clamped. This prevents the fallback
+        // from silently overriding a deliberate endpoint projection decision (e.g. leaf-like base clamps).
+        if (endpointRoles.usedExplicitParentHint && (preserveAuthoredAttachPoint || !isEndpointProjection)) {
           const sourceBaseZ = Number.isFinite(s.base?.z) ? (s.base?.z as number) : null;
           const sourceTipZ = Number.isFinite(s.tip?.z) ? (s.tip?.z as number) : null;
           const sourceTipMinusBase =
@@ -608,6 +624,9 @@ export function convertLysData(data: LysData, settings: SupportSettings, mesh?: 
           parentShaftId: endpointRoles.attachProjection.parentShaftId,
           t: endpointRoles.attachProjection.t,
           pos: knotPos,
+          // Stamp preserve/project intent so normalization can honor it
+          // rather than re-deriving it with potentially conflicting rules.
+          _importHint: preserveAuthoredAttachPoint ? 'preserve' : 'project',
         };
         result.knots.push(knot);
 
