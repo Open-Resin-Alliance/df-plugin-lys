@@ -759,6 +759,165 @@ describe('LysConverter', () => {
         assert.strictEqual(result.branches.length, 2, 'Expected mini parent and child to both import as branches');
     });
 
+    it('should keep parent-branch knots projected onto host shafts in trunk->branch->branch chains', () => {
+        const NESTED_BRANCH_CHAIN_DATA = {
+            objects: {
+                present: {
+                    byId: {
+                        o1: {
+                            id: 'o1',
+                            formerCenter: { x: 0, y: 0, z: 0 },
+                            position: { x: 0, y: 0, z: 0 },
+                            rotation: { x: 0, y: 0, z: 0 },
+                            scale: { x: 1, y: 1, z: 1 },
+                        }
+                    }
+                }
+            },
+            supports: {
+                present: {
+                    byId: {
+                        s_root: {
+                            id: 's_root',
+                            type: 1,
+                            mini: false,
+                            base: { x: 0, y: 0, z: 0 },
+                            tip: { x: 0, y: 0, z: 20 },
+                            parentId: [],
+                            objectIdTip: 'o1',
+                            objectIdBase: 'o1',
+                            settings: {
+                                base: { joinDiameter: 1.0 },
+                                tip: { diameter: 0.8, length: 2.0 },
+                            },
+                        },
+                        s_mid_branch: {
+                            id: 's_mid_branch',
+                            type: 1,
+                            mini: false,
+                            // Deliberately beyond parent socket range so raw authored attach would overshoot.
+                            base: { x: 0, y: 0, z: 23 },
+                            tip: { x: 4, y: 0, z: 25 },
+                            parentId: ['s_root'],
+                            parentBaseId: 's_root',
+                            parentTipId: null,
+                            objectIdTip: 'o1',
+                            objectIdBase: 'o1',
+                            settings: {
+                                base: { joinDiameter: 0.7 },
+                                tip: { diameter: 0.5, length: 1.5 },
+                            },
+                        },
+                        s_child_branch: {
+                            id: 's_child_branch',
+                            type: 1,
+                            mini: false,
+                            base: { x: 4, y: 0, z: 25.2 },
+                            tip: { x: 8, y: 0, z: 30 },
+                            parentId: ['s_mid_branch'],
+                            parentBaseId: 's_mid_branch',
+                            parentTipId: null,
+                            objectIdTip: 'o1',
+                            objectIdBase: 'o1',
+                            settings: {
+                                base: { joinDiameter: 0.55 },
+                                tip: { diameter: 0.42, length: 1.2 },
+                            },
+                        },
+                    }
+                }
+            }
+        };
+
+        const result = LysConverter.convert(NESTED_BRANCH_CHAIN_DATA as any, createDefaultSettings());
+        assert.strictEqual(result.branches.length, 2, 'Expected both supports in the chain to import as branches');
+
+        const parentBranch = result.branches.find((b) =>
+            result.knots.some((k) => k.parentShaftId === b.segments[0].id)
+        );
+        assert.ok(parentBranch, 'Expected to find the middle branch that hosts the child branch knot');
+
+        const parentBranchKnot = result.knots.find((k) => k.id === parentBranch!.parentKnotId);
+        assert.ok(parentBranchKnot, 'Expected middle branch parent knot to exist');
+
+        // Authored attach Z was 23; projected host knot should be lower and shaft-aligned.
+        assert.ok(parentBranchKnot!.pos.z < 22,
+            'Middle branch parent knot should use projected host position, not overshooting authored attach Z');
+    });
+
+    it('should suppress endpoint-clamp debug logs when attach delta is negligible', () => {
+        const NEGLIGIBLE_DELTA_DATA = {
+            objects: {
+                present: {
+                    byId: {
+                        o1: {
+                            id: 'o1',
+                            formerCenter: { x: 0, y: 0, z: 0 },
+                            position: { x: 0, y: 0, z: 0 },
+                            rotation: { x: 0, y: 0, z: 0 },
+                            scale: { x: 1, y: 1, z: 1 },
+                        }
+                    }
+                }
+            },
+            supports: {
+                present: {
+                    byId: {
+                        s_root: {
+                            id: 's_root',
+                            type: 1,
+                            mini: false,
+                            base: { x: 0, y: 0, z: 0 },
+                            tip: { x: 0, y: 0, z: 20 },
+                            parentId: [],
+                            objectIdTip: 'o1',
+                            objectIdBase: 'o1',
+                            settings: {
+                                base: { joinDiameter: 1.0 },
+                                tip: { diameter: 0.8, length: 2.0 },
+                            },
+                        },
+                        s_child_near_exact: {
+                            id: 's_child_near_exact',
+                            type: 1,
+                            mini: false,
+                            base: { x: 0, y: 0, z: 18 },
+                            tip: { x: 6, y: 0, z: 22 },
+                            parentId: ['s_root'],
+                            parentBaseId: 's_root',
+                            parentTipId: null,
+                            objectIdTip: 'o1',
+                            objectIdBase: 'o1',
+                            settings: {
+                                base: { joinDiameter: 0.7 },
+                                tip: { diameter: 0.5, length: 1.5 },
+                            },
+                        },
+                    }
+                }
+            }
+        };
+
+        const originalWarn = console.warn;
+        const debugMessages: unknown[] = [];
+
+        console.warn = (...args: unknown[]) => {
+            if (args[0] === '[LysConverter][debug] endpoint-clamped attach projection') {
+                debugMessages.push(args);
+            }
+            originalWarn(...(args as Parameters<typeof console.warn>));
+        };
+
+        try {
+            LysConverter.convert(NEGLIGIBLE_DELTA_DATA as any, createDefaultSettings());
+        } finally {
+            console.warn = originalWarn;
+        }
+
+        assert.strictEqual(debugMessages.length, 0,
+            'Endpoint-clamped debug logging should be suppressed when authoredAttachDeltaMm is negligible');
+    });
+
     it('should group supports per owning object and apply XY placement per object', () => {
         const MULTI_OBJECT_DATA = {
             objects: {

@@ -544,7 +544,9 @@ export function convertLysData(data: LysData, settings: SupportSettings, mesh?: 
         );
         const authoredAttachDeltaMm = endpointRoles.attachPoint.distanceTo(projectedAttachPoint);
         const attachT = endpointRoles.attachProjection.t;
-        if (attachT <= 0.02 || attachT >= 0.98) {
+        const isEndpointProjection = attachT <= 0.02 || attachT >= 0.98;
+        const hasLargeAttachDelta = authoredAttachDeltaMm > 0.5;
+        if (isEndpointProjection && hasLargeAttachDelta) {
           console.warn('[LysConverter][debug] endpoint-clamped attach projection', {
             supportId: id,
             objectId,
@@ -561,20 +563,26 @@ export function convertLysData(data: LysData, settings: SupportSettings, mesh?: 
             usedExplicitParentHint: endpointRoles.usedExplicitParentHint,
           });
         }
+        // Supports that are themselves parents must stay projected onto their host shaft
+        // so descendants attach to a stable, segment-legal knot position.
+        // Terminal supports can preserve authored endpoint-side positions for visual fidelity.
+        const isSupportWithChildren = hasChildren(id);
         // When projection clamps to shaft TIP (t>=0.98 with significant error), the authored attach
         // point typically lies on the parent contact cone -- valid in LycheeSlicer full base-to-tip
         // range but outside DragonFruit socketJoint boundary. Use authored position for fidelity.
         // t=0 (base-end) clamps stay at the projected point; their authored positions are usually
         // below the shaft root and would require tree restructuring to fix properly.
-        const isClampedToShaftTip = attachT >= 0.98 && authoredAttachDeltaMm > 0.5;
+        const isClampedToShaftTip = attachT >= 0.98 && hasLargeAttachDelta;
         const preserveAuthoredAttachPoint =
-          endpointRoles.usedExplicitParentHint && (authoredAttachDeltaMm <= 0.5 || isClampedToShaftTip);
+          !isSupportWithChildren
+          && endpointRoles.usedExplicitParentHint
+          && (authoredAttachDeltaMm <= 0.5 || isClampedToShaftTip);
 
         let knotPos = preserveAuthoredAttachPoint
           ? { x: endpointRoles.attachPoint.x, y: endpointRoles.attachPoint.y, z: endpointRoles.attachPoint.z }
           : endpointRoles.attachProjection.pointOnLine;
 
-        if (endpointRoles.usedExplicitParentHint) {
+        if (!isSupportWithChildren && endpointRoles.usedExplicitParentHint) {
           const sourceBaseZ = Number.isFinite(s.base?.z) ? (s.base?.z as number) : null;
           const sourceTipZ = Number.isFinite(s.tip?.z) ? (s.tip?.z as number) : null;
           const sourceTipMinusBase =
