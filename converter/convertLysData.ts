@@ -546,7 +546,20 @@ export function convertLysData(data: LysData, settings: SupportSettings, mesh?: 
         const attachT = endpointRoles.attachProjection.t;
         const isEndpointProjection = attachT <= 0.02 || attachT >= 0.98;
         const hasLargeAttachDelta = authoredAttachDeltaMm > 0.5;
-        if (isEndpointProjection && hasLargeAttachDelta) {
+        const isSupportWithChildren = hasChildren(id);
+        const shouldDebugEndpointClamp = authoredAttachDeltaMm > 1.0;
+        // When projection clamps to shaft TIP (t>=0.98 with significant error), the authored attach
+        // point typically lies on the parent contact cone -- valid in LycheeSlicer full base-to-tip
+        // range but outside DragonFruit socketJoint boundary. Use authored position for fidelity.
+        // For base-side clamps, preserve authored position only for terminal supports (no children)
+        // where explicit endpoint hints indicate endpoint intent.
+        const isClampedToShaftTip = attachT >= 0.98 && hasLargeAttachDelta;
+        const isClampedToShaftBaseTerminal = attachT <= 0.02 && hasLargeAttachDelta && !isSupportWithChildren;
+        const preserveAuthoredAttachPoint =
+          endpointRoles.usedExplicitParentHint
+          && (authoredAttachDeltaMm <= 0.5 || isClampedToShaftTip || isClampedToShaftBaseTerminal);
+
+        if (isEndpointProjection && shouldDebugEndpointClamp && !preserveAuthoredAttachPoint) {
           console.warn('[LysConverter][debug] endpoint-clamped attach projection', {
             supportId: id,
             objectId,
@@ -561,28 +574,15 @@ export function convertLysData(data: LysData, settings: SupportSettings, mesh?: 
             },
             projectedPoint: endpointRoles.attachProjection.pointOnLine,
             usedExplicitParentHint: endpointRoles.usedExplicitParentHint,
+            preserveAuthoredAttachPoint,
           });
         }
-        // Supports that are themselves parents must stay projected onto their host shaft
-        // so descendants attach to a stable, segment-legal knot position.
-        // Terminal supports can preserve authored endpoint-side positions for visual fidelity.
-        const isSupportWithChildren = hasChildren(id);
-        // When projection clamps to shaft TIP (t>=0.98 with significant error), the authored attach
-        // point typically lies on the parent contact cone -- valid in LycheeSlicer full base-to-tip
-        // range but outside DragonFruit socketJoint boundary. Use authored position for fidelity.
-        // t=0 (base-end) clamps stay at the projected point; their authored positions are usually
-        // below the shaft root and would require tree restructuring to fix properly.
-        const isClampedToShaftTip = attachT >= 0.98 && hasLargeAttachDelta;
-        const preserveAuthoredAttachPoint =
-          !isSupportWithChildren
-          && endpointRoles.usedExplicitParentHint
-          && (authoredAttachDeltaMm <= 0.5 || isClampedToShaftTip);
 
         let knotPos = preserveAuthoredAttachPoint
           ? { x: endpointRoles.attachPoint.x, y: endpointRoles.attachPoint.y, z: endpointRoles.attachPoint.z }
           : endpointRoles.attachProjection.pointOnLine;
 
-        if (!isSupportWithChildren && endpointRoles.usedExplicitParentHint) {
+        if (endpointRoles.usedExplicitParentHint) {
           const sourceBaseZ = Number.isFinite(s.base?.z) ? (s.base?.z as number) : null;
           const sourceTipZ = Number.isFinite(s.tip?.z) ? (s.tip?.z as number) : null;
           const sourceTipMinusBase =

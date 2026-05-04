@@ -182,6 +182,69 @@ describe('LysConverter', () => {
         assert.ok(hostedByTrunk, 'Hinted knot should remain attached to a real trunk segment');
     });
 
+    it('should preserve authored explicit base-side attach for terminal endpoint-clamped children', () => {
+        const BASE_CLAMP_TERMINAL_DATA = {
+            objects: {
+                present: {
+                    byId: {
+                        o1: {
+                            id: 'o1',
+                            formerCenter: { x: 0, y: 0, z: 0 },
+                            position: { x: 0, y: 0, z: 0 },
+                            rotation: { x: 0, y: 0, z: 0 },
+                            scale: { x: 1, y: 1, z: 1 },
+                        }
+                    }
+                }
+            },
+            supports: {
+                present: {
+                    byId: {
+                        s_root: {
+                            id: 's_root',
+                            type: 1,
+                            mini: false,
+                            base: { x: 0, y: 0, z: 0 },
+                            tip: { x: 0, y: 0, z: 20 },
+                            parentId: [],
+                            objectIdTip: 'o1',
+                            objectIdBase: 'o1',
+                            settings: {
+                                base: { joinDiameter: 1.0 },
+                                tip: { diameter: 0.8, length: 2.0 },
+                            },
+                        },
+                        s_child_terminal: {
+                            id: 's_child_terminal',
+                            type: 1,
+                            mini: false,
+                            base: { x: 0, y: 0, z: 0.20344101267939063 },
+                            tip: { x: 6, y: 0, z: 8 },
+                            parentId: ['s_root'],
+                            parentBaseId: 's_root',
+                            parentTipId: null,
+                            objectIdTip: 'o1',
+                            objectIdBase: 'o1',
+                            settings: {
+                                base: { joinDiameter: 0.7 },
+                                tip: { diameter: 0.5, length: 1.5 },
+                            },
+                        },
+                    }
+                }
+            }
+        };
+
+        const result = LysConverter.convert(BASE_CLAMP_TERMINAL_DATA as any, createDefaultSettings());
+        assert.strictEqual(result.branches.length, 1, 'Expected terminal explicit child to import as branch');
+
+        const branch = result.branches[0];
+        const knot = result.knots.find((k) => k.id === branch.parentKnotId);
+        assert.ok(knot, 'Expected branch parent knot for terminal child');
+        assert.ok(Math.abs(knot!.pos.z - 0.20344101267939063) < 1e-6,
+            'Terminal explicit base-side attach should preserve authored base-clamp knot Z');
+    });
+
     it('should fall back to parentBaseId/parentTipId host when explicit parentId is stale', () => {
         const STALE_PARENT_ID_DATA = {
             objects: {
@@ -759,7 +822,7 @@ describe('LysConverter', () => {
         assert.strictEqual(result.branches.length, 2, 'Expected mini parent and child to both import as branches');
     });
 
-    it('should keep parent-branch knots projected onto host shafts in trunk->branch->branch chains', () => {
+    it('should preserve authored attach position for middle branches in trunk->branch->branch chains', () => {
         const NESTED_BRANCH_CHAIN_DATA = {
             objects: {
                 present: {
@@ -840,9 +903,10 @@ describe('LysConverter', () => {
         const parentBranchKnot = result.knots.find((k) => k.id === parentBranch!.parentKnotId);
         assert.ok(parentBranchKnot, 'Expected middle branch parent knot to exist');
 
-        // Authored attach Z was 23; projected host knot should be lower and shaft-aligned.
-        assert.ok(parentBranchKnot!.pos.z < 22,
-            'Middle branch parent knot should use projected host position, not overshooting authored attach Z');
+        // Authored attach Z was 23; middle branch can be both child and parent and should
+        // preserve authored attachment when tip-side clamp indicates Lychee cone-side placement.
+        assert.ok(Math.abs(parentBranchKnot!.pos.z - 23) < 1e-6,
+            'Middle branch parent knot should preserve authored attach Z for nested branch chains');
     });
 
     it('should suppress endpoint-clamp debug logs when attach delta is negligible', () => {
