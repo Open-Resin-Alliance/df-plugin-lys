@@ -138,13 +138,10 @@ export function convertLysData(data: LysData, settings: SupportSettings, mesh?: 
     };
 
     const transformRootBasePoint = (v: { x: number; y: number; z: number }): THREE.Vector3 => {
-      // LYS support roots are authored after model scaling. Do not re-apply object scale here,
-      // but keep staged rotation + pre-support Z alignment before floor anchoring.
-      const transformed = new THREE.Vector3(v.x, v.y, v.z);
-      transformed.applyQuaternion(objectQuaternion);
-      transformed.add(objectPreSupportPos);
-      transformed.z = 0;
-      return transformed;
+      // LYS root/base positions are authored in post-scale, post-rotation world XY space
+      // (relative to the object's world position). Do not apply object scale or rotation here —
+      // only floor-anchor. World XY placement is added later by applyWorldXYPlacementToSlice.
+      return new THREE.Vector3(v.x, v.y, 0);
     };
 
     const rootDefaults = settings.roots;
@@ -839,8 +836,11 @@ export function convertLysData(data: LysData, settings: SupportSettings, mesh?: 
       let pairing = pickBracePairing(hostA, hostB, pA, pB);
       if (!pairing) continue;
 
-      let knotPosA: Vec3 = pairing.projA.pointOnLine;
-      let knotPosB: Vec3 = pairing.projB.pointOnLine;
+      // Keep authored brace geometry after pairing selects endpoint-to-host mapping.
+      // Projection remains authoritative for parentShaftId/t, but using projected points here
+      // can visually squash braces when hosts clamp endpoints near segment boundaries.
+      let knotPosA: Vec3 = { x: pairing.attachPointA.x, y: pairing.attachPointA.y, z: pairing.attachPointA.z };
+      let knotPosB: Vec3 = { x: pairing.attachPointB.x, y: pairing.attachPointB.y, z: pairing.attachPointB.z };
 
       const parentBaseId = typeof s.parentBaseId === 'string' ? s.parentBaseId : null;
       const parentTipId = typeof s.parentTipId === 'string' ? s.parentTipId : null;
@@ -871,7 +871,12 @@ export function convertLysData(data: LysData, settings: SupportSettings, mesh?: 
             : null;
 
         if (hintedAttachA && hintedAttachB && hintedProjA && hintedProjB) {
-          pairing = { projA: hintedProjA, projB: hintedProjB };
+          pairing = {
+            projA: hintedProjA,
+            projB: hintedProjB,
+            attachPointA: hintedAttachA,
+            attachPointB: hintedAttachB,
+          };
           knotPosA = { x: hintedAttachA.x, y: hintedAttachA.y, z: hintedAttachA.z };
           knotPosB = { x: hintedAttachB.x, y: hintedAttachB.y, z: hintedAttachB.z };
         }

@@ -389,6 +389,76 @@ describe('LysConverter', () => {
             'Brace knots should match parent positions');
     });
 
+    it('should keep authored brace endpoint positions for inferred two-parent braces (no explicit endpoint hints)', () => {
+        const BRACE_NO_HINT_DATA = {
+            objects: {
+                present: {
+                    byId: {
+                        o1: {
+                            id: 'o1',
+                            formerCenter: { x: 0, y: 0, z: 0 },
+                            position: { x: 0, y: 0, z: 0 },
+                            rotation: { x: 0, y: 0, z: 0 },
+                            scale: { x: 1, y: 1, z: 1 },
+                        }
+                    }
+                }
+            },
+            supports: {
+                present: {
+                    byId: {
+                        s_root_a: {
+                            id: 's_root_a',
+                            base: { x: 0, y: 0, z: 0 },
+                            tip: { x: 0, y: 0, z: 20 },
+                            parentId: [],
+                            objectIdTip: 'o1',
+                            objectIdBase: 'o1',
+                            settings: { tip: { length: 3 } }
+                        },
+                        s_root_b: {
+                            id: 's_root_b',
+                            base: { x: 10, y: 0, z: 0 },
+                            tip: { x: 10, y: 0, z: 20 },
+                            parentId: [],
+                            objectIdTip: 'o1',
+                            objectIdBase: 'o1',
+                            settings: { tip: { length: 3 } }
+                        },
+                        s_brace_no_hint: {
+                            id: 's_brace_no_hint',
+                            type: 0,
+                            base: { x: 0, y: 0, z: 20 },
+                            tip: { x: 10, y: 0, z: 20 },
+                            parentId: ['s_root_a', 's_root_b'],
+                            parentBaseId: null,
+                            parentTipId: null,
+                            objectIdTip: 'o1',
+                            objectIdBase: 'o1',
+                            settings: { base: { joinDiameter: 0.5 } }
+                        }
+                    }
+                }
+            }
+        };
+
+        const result = LysConverter.convert(BRACE_NO_HINT_DATA as any, createDefaultSettings());
+        assert.strictEqual(result.braces.length, 1, 'Expected one inferred two-parent brace');
+
+        const brace = result.braces[0];
+        const startKnot = result.knots.find(k => k.id === brace.startKnotId);
+        const endKnot = result.knots.find(k => k.id === brace.endKnotId);
+
+        assert.ok(startKnot, 'Brace start knot should exist');
+        assert.ok(endKnot, 'Brace end knot should exist');
+
+        const sortedByX = [startKnot!, endKnot!].sort((a, b) => a.pos.x - b.pos.x);
+        assert.ok(Math.abs(sortedByX[0].pos.x - 0) < 1e-6 && Math.abs(sortedByX[0].pos.z - 20) < 1e-6,
+            'First brace knot should keep authored base endpoint position (x=0,z=20)');
+        assert.ok(Math.abs(sortedByX[1].pos.x - 10) < 1e-6 && Math.abs(sortedByX[1].pos.z - 20) < 1e-6,
+            'Second brace knot should keep authored tip endpoint position (x=10,z=20)');
+    });
+
     it('should keep authored brace endpoint positions when explicit parentBaseId/parentTipId are provided', () => {
         const BRACE_HINT_DATA = {
             objects: {
@@ -798,7 +868,7 @@ describe('LysConverter', () => {
         assert.strictEqual(result.roots[0].transform.pos.x, 20, 'Result should use o2 XY placement');
     });
 
-    it('should apply staged transform order to root generation (formerCenter + Z/rotation, then XY) without re-scaling authored roots', () => {
+    it('should apply world XY placement to roots without re-applying object rotation or scale (roots are in post-transform world space)', () => {
         const STAGED_TRANSFORM_DATA = {
             objects: {
                 present: {
@@ -837,12 +907,11 @@ describe('LysConverter', () => {
 
         const root = result.roots[0];
 
-        // Expected order for ROOT base:
-        // base (1,0,0) -> rotate Z+90 => (0,1,0) [no additional support scaling]
-        // apply pre-support Z (+2) then floor clamp => z=0
-        // apply Stage B XY (+5,+7) => (5,8,0)
-        assert.strictEqual(root.transform.pos.x, 5, 'X should reflect post-generation world XY placement');
-        assert.strictEqual(root.transform.pos.y, 8, 'Y should reflect rotated authored root base then world XY placement');
+        // ROOT base is in post-scale, post-rotation world XY space in LYS.
+        // Only world XY placement is added; no scale or rotation is re-applied.
+        // base (1,0,0) -> floor clamp => z=0 -> apply Stage B XY (+5,+7) => (6,7,0)
+        assert.strictEqual(root.transform.pos.x, 6, 'X should be authored root X plus world X placement (no rotation or scale applied)');
+        assert.strictEqual(root.transform.pos.y, 7, 'Y should be authored root Y plus world Y placement (no rotation or scale applied)');
         assert.strictEqual(root.transform.pos.z, 0, 'Root base should remain floor anchored at z=0');
     });
 

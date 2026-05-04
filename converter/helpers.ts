@@ -701,6 +701,8 @@ export function pickBracePairing(
 ): {
   projA: { t: number; pointOnLine: Vec3; parentShaftId: string };
   projB: { t: number; pointOnLine: Vec3; parentShaftId: string };
+  attachPointA: THREE.Vector3;
+  attachPointB: THREE.Vector3;
 } | null {
   const directA = projectPointToHost(hostA, pA);
   const directB = projectPointToHost(hostB, pB);
@@ -723,11 +725,21 @@ export function pickBracePairing(
   }
 
   if (directError <= swappedError && directA && directB) {
-    return { projA: directA, projB: directB };
+    return {
+      projA: directA,
+      projB: directB,
+      attachPointA: pA,
+      attachPointB: pB,
+    };
   }
 
   if (swappedA && swappedB) {
-    return { projA: swappedA, projB: swappedB };
+    return {
+      projA: swappedA,
+      projB: swappedB,
+      attachPointA: pB,
+      attachPointB: pA,
+    };
   }
 
   return null;
