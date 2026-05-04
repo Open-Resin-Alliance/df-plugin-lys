@@ -607,6 +607,7 @@ function projectPointToHostPreferredSide(
 }
 
 export function pickAttachAndTipForSingleParent(
+  s: LysSupport,
   host: HostEntry,
   pA: THREE.Vector3,
   pB: THREE.Vector3,
@@ -616,6 +617,31 @@ export function pickAttachAndTipForSingleParent(
   tipPoint: THREE.Vector3;
   usedExplicitParentHint: boolean;
 } | null {
+  const tryPreferredAttach = (
+    attachPoint: THREE.Vector3,
+    tipPoint: THREE.Vector3,
+  ) => {
+    const projection = projectPointToHost(host, attachPoint);
+    if (!projection) return null;
+    return {
+      attachProjection: projection,
+      attachPoint,
+      tipPoint,
+      usedExplicitParentHint: false,
+    };
+  };
+
+  // When only one endpoint has a valid normal, treat that endpoint as the model-contact tip.
+  // This avoids misclassifying attach endpoints on supports where distance-to-host is ambiguous.
+  const baseHasNormal = hasValidNormal(s.baseNormal);
+  const tipHasNormal = hasValidNormal(s.tipNormal);
+  if (baseHasNormal !== tipHasNormal) {
+    const preferredByNormal = tipHasNormal
+      ? tryPreferredAttach(pA, pB)
+      : tryPreferredAttach(pB, pA);
+    if (preferredByNormal) return preferredByNormal;
+  }
+
   const projA = projectPointToHost(host, pA);
   const projB = projectPointToHost(host, pB);
 
@@ -655,16 +681,16 @@ export function pickAttachAndTipFromParentHints(
   const parentTipId = typeof s.parentTipId === 'string' ? s.parentTipId : null;
 
   if (parentBaseId === parentId && parentTipId !== parentId) {
-    const proj = projectPointToHostPreferredSide(host, pA, 'base') ?? projectPointToHost(host, pA);
+    const proj = projectPointToHost(host, pA);
     if (proj) return { attachProjection: proj, attachPoint: pA, tipPoint: pB, usedExplicitParentHint: true };
   }
 
   if (parentTipId === parentId && parentBaseId !== parentId) {
-    const proj = projectPointToHostPreferredSide(host, pB, 'tip') ?? projectPointToHost(host, pB);
+    const proj = projectPointToHost(host, pB);
     if (proj) return { attachProjection: proj, attachPoint: pB, tipPoint: pA, usedExplicitParentHint: true };
   }
 
-  return pickAttachAndTipForSingleParent(host, pA, pB);
+  return pickAttachAndTipForSingleParent(s, host, pA, pB);
 }
 
 export function pickBracePairing(

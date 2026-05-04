@@ -1,4 +1,4 @@
-import * as THREE from 'three';
+﻿import * as THREE from 'three';
 import { v4 as uuidv4 } from 'uuid';
 import {
   DragonfruitImportFormat,
@@ -138,8 +138,13 @@ export function convertLysData(data: LysData, settings: SupportSettings, mesh?: 
     };
 
     const transformRootBasePoint = (v: { x: number; y: number; z: number }): THREE.Vector3 => {
-      // Support roots are authored in post-scale world XY space; do not re-apply object scale.
-      return new THREE.Vector3(v.x, v.y, 0);
+      // LYS support roots are authored after model scaling. Do not re-apply object scale here,
+      // but keep staged rotation + pre-support Z alignment before floor anchoring.
+      const transformed = new THREE.Vector3(v.x, v.y, v.z);
+      transformed.applyQuaternion(objectQuaternion);
+      transformed.add(objectPreSupportPos);
+      transformed.z = 0;
+      return transformed;
     };
 
     const rootDefaults = settings.roots;
@@ -151,6 +156,52 @@ export function convertLysData(data: LysData, settings: SupportSettings, mesh?: 
 
     const hostsByLysId = new Map<string, HostEntry>();
     const sourceSupportByLysId = new Map(supportsForObject.map(({ id, s }) => [id, s] as const));
+    const childrenByParentId = new Map<string, string[]>();
+    for (const { id: childId, s: childSupport } of supportsForObject) {
+      const parentIds = inferParentIds(childSupport);
+      for (const parentId of parentIds) {
+        const existingChildren = childrenByParentId.get(parentId);
+        if (existingChildren) {
+          existingChildren.push(childId);
+        } else {
+          childrenByParentId.set(parentId, [childId]);
+        }
+      }
+    }
+
+    const hasChildren = (supportId: string): boolean => (childrenByParentId.get(supportId)?.length || 0) > 0;
+    const getParentHostCandidates = (s: LysSupport, primaryParentIds: string[]): string[] => {
+      const out: string[] = [];
+      const push = (raw: unknown) => {
+        if (typeof raw !== 'string') return;
+        const trimmed = raw.trim();
+        if (!trimmed || out.includes(trimmed)) return;
+        out.push(trimmed);
+      };
+
+      for (const pid of primaryParentIds) {
+        push(pid);
+      }
+
+      push(s.parentBaseId ?? null);
+      push(s.parentTipId ?? null);
+
+      return out;
+    };
+
+    const resolveImmediateParentHost = (
+      s: LysSupport,
+      primaryParentIds: string[],
+    ): { parentId: string; host: HostEntry } | null => {
+      const candidates = getParentHostCandidates(s, primaryParentIds);
+      for (const candidateParentId of candidates) {
+        const host = hostsByLysId.get(candidateParentId);
+        if (host) {
+          return { parentId: candidateParentId, host };
+        }
+      }
+      return null;
+    };
 
     const twigCandidates: { id: string; s: LysSupport }[] = [];
     const stickCandidates: { id: string; s: LysSupport }[] = [];
@@ -161,9 +212,12 @@ export function convertLysData(data: LysData, settings: SupportSettings, mesh?: 
 
     for (const { id, s } of supportsForObject) {
       const parentIds = inferParentIds(s);
+      const supportHasChildren = hasChildren(id);
 
       if (parentIds.length === 0) {
-        if (isTwigCandidate(s, parentIds, stickVsTwigCutoffMm)) {
+        if (supportHasChildren) {
+          rootCandidates.push({ id, s });
+        } else if (isTwigCandidate(s, parentIds, stickVsTwigCutoffMm)) {
           twigCandidates.push({ id, s });
         } else if (isStickCandidate(s, parentIds, stickVsTwigCutoffMm)) {
           stickCandidates.push({ id, s });
@@ -469,11 +523,12 @@ export function convertLysData(data: LysData, settings: SupportSettings, mesh?: 
           continue;
         }
 
-        const parentId = parentIds[0];
-        const parentHost = hostsByLysId.get(parentId);
-        if (!parentHost) {
+        const resolvedParent = resolveImmediateParentHost(s, parentIds);
+        if (!resolvedParent) {
           continue;
         }
+        const parentId = resolvedParent.parentId;
+        const parentHost = resolvedParent.host;
 
         const pA = transformObjectPoint(s.base);
         const pB = transformObjectPoint(s.tip);
@@ -491,7 +546,32 @@ export function convertLysData(data: LysData, settings: SupportSettings, mesh?: 
           endpointRoles.attachProjection.pointOnLine.z,
         );
         const authoredAttachDeltaMm = endpointRoles.attachPoint.distanceTo(projectedAttachPoint);
-        const preserveAuthoredAttachPoint = endpointRoles.usedExplicitParentHint && authoredAttachDeltaMm <= 0.5;
+        const attachT = endpointRoles.attachProjection.t;
+        if (attachT <= 0.02 || attachT >= 0.98) {
+          console.warn('[LysConverter][debug] endpoint-clamped attach projection', {
+            supportId: id,
+            objectId,
+            parentId,
+            parentShaftId: endpointRoles.attachProjection.parentShaftId,
+            t: attachT,
+            authoredAttachDeltaMm,
+            attachPoint: {
+              x: endpointRoles.attachPoint.x,
+              y: endpointRoles.attachPoint.y,
+              z: endpointRoles.attachPoint.z,
+            },
+            projectedPoint: endpointRoles.attachProjection.pointOnLine,
+            usedExplicitParentHint: endpointRoles.usedExplicitParentHint,
+          });
+        }
+        // When projection clamps to shaft TIP (t>=0.98 with significant error), the authored attach
+        // point typically lies on the parent contact cone -- valid in LycheeSlicer full base-to-tip
+        // range but outside DragonFruit socketJoint boundary. Use authored position for fidelity.
+        // t=0 (base-end) clamps stay at the projected point; their authored positions are usually
+        // below the shaft root and would require tree restructuring to fix properly.
+        const isClampedToShaftTip = attachT >= 0.98 && authoredAttachDeltaMm > 0.5;
+        const preserveAuthoredAttachPoint =
+          endpointRoles.usedExplicitParentHint && (authoredAttachDeltaMm <= 0.5 || isClampedToShaftTip);
 
         let knotPos = preserveAuthoredAttachPoint
           ? { x: endpointRoles.attachPoint.x, y: endpointRoles.attachPoint.y, z: endpointRoles.attachPoint.z }
@@ -518,7 +598,6 @@ export function convertLysData(data: LysData, settings: SupportSettings, mesh?: 
             };
           }
         }
-
         const knot: Knot = {
           id: uuidv4(),
           parentShaftId: endpointRoles.attachProjection.parentShaftId,
@@ -535,7 +614,7 @@ export function convertLysData(data: LysData, settings: SupportSettings, mesh?: 
         const totalDist = knotPosVec.distanceTo(endpointRoles.tipPoint);
         const shaftLength = totalDist - tipLen;
         const isLeafByGeometry = shaftLength <= 0.2;
-        const isLeaf = isMiniSupport(s) || isLeafByGeometry;
+        const isLeaf = (isMiniSupport(s) || isLeafByGeometry) && !hasChildren(id);
 
         const transformedTipNormal = s.tipNormal ? transformObjectNormal(s.tipNormal) : null;
         const { socketJoint, contactCone } = createContactAssembly(
@@ -626,19 +705,23 @@ export function convertLysData(data: LysData, settings: SupportSettings, mesh?: 
     }
 
     unresolvedBranches.forEach(({ id, parentIds }) => {
-      const parentId = parentIds[0];
-      console.warn(`[LysConverter] Child ${id} (object ${objectId}) refers to unknown/unprocessed parent ${String(parentId)}. Skipping.`);
+      const candidates = getParentHostCandidates(sourceSupportByLysId.get(id) ?? ({ } as LysSupport), parentIds);
+      const candidateText = candidates.length > 0 ? candidates.join(', ') : String(parentIds[0]);
+      console.warn(`[LysConverter] Child ${id} (object ${objectId}) refers to unknown/unprocessed parent(s) ${candidateText}. Skipping.`);
     });
 
     for (const { id, s, parentIds } of kickstandCandidates) {
       if (!s.base || !s.tip || parentIds.length === 0) continue;
 
-      const parentId = parentIds[0];
-      const parentHost = hostsByLysId.get(parentId);
-      if (!parentHost) {
-        console.warn(`[LysConverter] Kickstand candidate ${id} (object ${objectId}) refers to unknown parent ${String(parentId)}. Skipping.`);
+      const resolvedParent = resolveImmediateParentHost(s, parentIds);
+      if (!resolvedParent) {
+        const candidates = getParentHostCandidates(s, parentIds);
+        const candidateText = candidates.length > 0 ? candidates.join(', ') : String(parentIds[0]);
+        console.warn(`[LysConverter] Kickstand candidate ${id} (object ${objectId}) refers to unknown parent(s) ${candidateText}. Skipping.`);
         continue;
       }
+      const parentId = resolvedParent.parentId;
+      const parentHost = resolvedParent.host;
 
       if (parentHost.kind === 'kickstand') {
         console.warn(`[LysConverter] Kickstand candidate ${id} (object ${objectId}) cannot attach to kickstand parent ${String(parentId)}. Skipping.`);

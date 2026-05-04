@@ -107,7 +107,7 @@ describe('LysConverter', () => {
         assert.ok(hostedByKnownSegment, 'Imported knot.parentShaftId should match a real segment ID for editability');
     });
 
-    it('should treat explicit single-parent parentBaseId hints as parent-side host preferences without flipping child endpoints', () => {
+    it('should honor explicit parent endpoint mapping without forcing projection to parent root side', () => {
         const BASE_SIDE_HINT_DATA = {
             objects: {
                 present: {
@@ -148,7 +148,7 @@ describe('LysConverter', () => {
                             isBaseTip: true,
                             // isBaseTip should not flip branch endpoint roles for explicit single-parent hints.
                             // base remains the attach-side candidate; tip remains the model-contact side.
-                            base: { x: 0.2, y: 0, z: 2 },
+                            base: { x: 0.2, y: 0, z: 16 },
                             tip: { x: 6, y: 0, z: 14 },
                             parentId: [],
                             parentBaseId: 's_root',
@@ -173,12 +173,126 @@ describe('LysConverter', () => {
         assert.ok(knot, 'Expected branch parent knot to exist');
         assert.ok(branch.contactCone, 'Expected branch to include contact cone');
 
-        assert.ok((knot!.t ?? -1) <= 0.05, 'parentBaseId hint should bias knot projection near host base side (t≈0)');
+        assert.ok(Math.abs(knot!.pos.z - 16) < 1e-6,
+            'parentBaseId should map which child endpoint attaches, not force attachment down to parent root side');
         assert.ok(Math.abs(branch.contactCone!.pos.x - 6) < 1e-6, 'Branch tip should remain sourced from LYS tip endpoint');
         assert.ok(Math.abs(branch.contactCone!.pos.z - 14) < 1e-6, 'Branch tip Z should remain sourced from LYS tip endpoint');
 
         const hostedByTrunk = result.trunks.some(t => t.segments.some(seg => seg.id === knot!.parentShaftId));
         assert.ok(hostedByTrunk, 'Hinted knot should remain attached to a real trunk segment');
+    });
+
+    it('should fall back to parentBaseId/parentTipId host when explicit parentId is stale', () => {
+        const STALE_PARENT_ID_DATA = {
+            objects: {
+                present: {
+                    byId: {
+                        o1: {
+                            id: 'o1',
+                            formerCenter: { x: 0, y: 0, z: 0 },
+                            position: { x: 0, y: 0, z: 0 },
+                            rotation: { x: 0, y: 0, z: 0 },
+                            scale: { x: 1, y: 1, z: 1 },
+                        }
+                    }
+                }
+            },
+            supports: {
+                present: {
+                    byId: {
+                        s_root: {
+                            id: 's_root',
+                            base: { x: 0, y: 0, z: 0 },
+                            tip: { x: 0, y: 0, z: 20 },
+                            parentId: [],
+                            objectIdTip: 'o1',
+                            objectIdBase: 'o1',
+                            settings: { tip: { length: 3 } }
+                        },
+                        s_child_stale_parent: {
+                            id: 's_child_stale_parent',
+                            base: { x: 0.2, y: 0, z: 12 },
+                            tip: { x: 6, y: 0, z: 14 },
+                            parentId: ['s_missing_parent'],
+                            parentBaseId: 's_root',
+                            parentTipId: null,
+                            objectIdTip: 'o1',
+                            objectIdBase: 'o1',
+                            settings: { tip: { diameter: 0.6, length: 2 } }
+                        }
+                    }
+                }
+            }
+        };
+
+        const result = LysConverter.convert(STALE_PARENT_ID_DATA as any, createDefaultSettings());
+
+        assert.strictEqual(result.branches.length, 1, 'Child with stale parentId should still import via explicit parent endpoint hints');
+        const branch = result.branches[0];
+        const knot = result.knots.find(k => k.id === branch.parentKnotId);
+        assert.ok(knot, 'Fallback-imported child should have a parent knot');
+        assert.ok(result.trunks.some(t => t.segments.some(seg => seg.id === knot!.parentShaftId)),
+            'Fallback-imported child knot should attach to a real trunk segment');
+    });
+
+    it('should infer single-parent attach endpoint from endpoint normals before distance heuristic', () => {
+        const NORMAL_INFERRED_ENDPOINT_DATA = {
+            objects: {
+                present: {
+                    byId: {
+                        o1: {
+                            id: 'o1',
+                            formerCenter: { x: 0, y: 0, z: 0 },
+                            position: { x: 0, y: 0, z: 0 },
+                            rotation: { x: 0, y: 0, z: 0 },
+                            scale: { x: 1, y: 1, z: 1 },
+                        }
+                    }
+                }
+            },
+            supports: {
+                present: {
+                    byId: {
+                        s_root: {
+                            id: 's_root',
+                            base: { x: 0, y: 0, z: 0 },
+                            tip: { x: 0, y: 0, z: 20 },
+                            parentId: [],
+                            objectIdTip: 'o1',
+                            objectIdBase: 'o1',
+                            settings: {
+                                base: { joinDiameter: 1.0 },
+                                tip: { diameter: 0.8, length: 2.0 },
+                            },
+                        },
+                        s_child_normal_hint: {
+                            id: 's_child_normal_hint',
+                            // Base endpoint is model-contact (has normal), so tip endpoint should attach to host.
+                            base: { x: 0.1, y: 0, z: 4.0 },
+                            tip: { x: 2.5, y: 0, z: 10.0 },
+                            baseNormal: { x: 0, y: 0, z: 1 },
+                            parentId: ['s_root'],
+                            objectIdTip: 'o1',
+                            objectIdBase: 'o1',
+                            settings: {
+                                base: { joinDiameter: 0.7 },
+                                tip: { diameter: 0.6, length: 2.0 },
+                            },
+                        },
+                    }
+                }
+            }
+        };
+
+        const result = LysConverter.convert(NORMAL_INFERRED_ENDPOINT_DATA as any, createDefaultSettings());
+        assert.strictEqual(result.branches.length, 1, 'Expected one branch from single-parent support');
+
+        const branch = result.branches[0];
+        assert.ok(branch.contactCone, 'Expected branch to include contact cone');
+
+        // Base endpoint has the valid normal, so it should remain the model-contact tip.
+        assert.ok(Math.abs(branch.contactCone!.pos.x - 0.1) < 1e-6, 'Contact cone X should follow normal-designated tip endpoint');
+        assert.ok(Math.abs(branch.contactCone!.pos.z - 4.0) < 1e-6, 'Contact cone Z should follow normal-designated tip endpoint');
     });
 
     it('should convert grounded single-parent supports with explicit parent hint into kickstands', () => {
@@ -505,6 +619,76 @@ describe('LysConverter', () => {
             'Leaf body diameter should follow the attached endpoint (anchor) diameter');
     });
 
+    it('should promote mini parents with children into host branches', () => {
+        const CHILD_HOST_PROMOTION_DATA = {
+            objects: {
+                present: {
+                    byId: {
+                        o1: {
+                            id: 'o1',
+                            formerCenter: { x: 0, y: 0, z: 0 },
+                            position: { x: 0, y: 0, z: 0 },
+                            rotation: { x: 0, y: 0, z: 0 },
+                            scale: { x: 1, y: 1, z: 1 },
+                        }
+                    }
+                }
+            },
+            supports: {
+                present: {
+                    byId: {
+                        s_root: {
+                            id: 's_root',
+                            base: { x: 0, y: 0, z: 0 },
+                            tip: { x: 0, y: 0, z: 20 },
+                            parentId: [],
+                            objectIdTip: 'o1',
+                            objectIdBase: 'o1',
+                            settings: {
+                                tip: { diameter: 0.6, length: 2.0 },
+                                base: { joinDiameter: 1.0 },
+                            },
+                        },
+                        s_mini_parent: {
+                            id: 's_mini_parent',
+                            mini: true,
+                            base: { x: 0, y: 0, z: 8 },
+                            tip: { x: 3, y: 0, z: 10 },
+                            parentId: ['s_root'],
+                            objectIdTip: 'o1',
+                            objectIdBase: 'o1',
+                            settings: {
+                                base: { joinDiameter: 0.9 },
+                                tip: { diameter: 0.5, pointDiameter: 0.25, length: 2.0 },
+                            },
+                        },
+                        s_child_of_mini: {
+                            id: 's_child_of_mini',
+                            mini: false,
+                            base: { x: 3, y: 0, z: 10.2 },
+                            tip: { x: 8, y: 0, z: 16 },
+                            parentId: ['s_mini_parent'],
+                            objectIdTip: 'o1',
+                            objectIdBase: 'o1',
+                            settings: {
+                                base: { joinDiameter: 0.7 },
+                                tip: { diameter: 0.45, length: 1.2 },
+                            },
+                        },
+                    },
+                },
+            },
+        };
+
+        const result = LysConverter.convert(CHILD_HOST_PROMOTION_DATA as any, createDefaultSettings());
+
+        // Mini support with descendants must remain host-capable, not collapsed into a leaf.
+        assert.strictEqual(result.leaves.length, 0, 'Mini parent with children should not collapse to leaf');
+
+        // Expect both child supports to survive as branches (mini parent host + its child).
+        assert.strictEqual(result.branches.length, 2, 'Expected mini parent and child to both import as branches');
+    });
+
     it('should group supports per owning object and apply XY placement per object', () => {
         const MULTI_OBJECT_DATA = {
             objects: {
@@ -614,7 +798,7 @@ describe('LysConverter', () => {
         assert.strictEqual(result.roots[0].transform.pos.x, 20, 'Result should use o2 XY placement');
     });
 
-    it('should apply staged transform order to support generation (formerCenter + Z/rotation/scale, then XY)', () => {
+    it('should apply staged transform order to root generation (formerCenter + Z/rotation, then XY) without re-scaling authored roots', () => {
         const STAGED_TRANSFORM_DATA = {
             objects: {
                 present: {
@@ -653,12 +837,12 @@ describe('LysConverter', () => {
 
         const root = result.roots[0];
 
-        // Expected order:
-        // base (1,0,0) -> scale (2,0,0) -> rotate Z+90 => (0,2,0)
+        // Expected order for ROOT base:
+        // base (1,0,0) -> rotate Z+90 => (0,1,0) [no additional support scaling]
         // apply pre-support Z (+2) then floor clamp => z=0
-        // apply Stage B XY (+5,+7) => (5,9,0)
+        // apply Stage B XY (+5,+7) => (5,8,0)
         assert.strictEqual(root.transform.pos.x, 5, 'X should reflect post-generation world XY placement');
-        assert.strictEqual(root.transform.pos.y, 9, 'Y should reflect rotated/scaled local base then world XY placement');
+        assert.strictEqual(root.transform.pos.y, 8, 'Y should reflect rotated authored root base then world XY placement');
         assert.strictEqual(root.transform.pos.z, 0, 'Root base should remain floor anchored at z=0');
     });
 
