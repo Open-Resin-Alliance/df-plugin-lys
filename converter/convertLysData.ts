@@ -204,6 +204,8 @@ export function convertLysData(data: LysData, settings: SupportSettings, mesh?: 
     const resolveBraceParentHosts = (
       s: LysSupport,
       primaryParentIds: string[],
+      pA: THREE.Vector3,
+      pB: THREE.Vector3,
     ): { parentAId: string; hostA: HostEntry; parentBId: string; hostB: HostEntry } | null => {
       const normalizedParentBaseId = typeof s.parentBaseId === 'string' && s.parentBaseId.trim().length > 0
         ? s.parentBaseId.trim()
@@ -235,16 +237,56 @@ export function convertLysData(data: LysData, settings: SupportSettings, mesh?: 
         const host = hostsByLysId.get(candidateParentId);
         if (!host) continue;
         resolved.push({ parentId: candidateParentId, host });
-        if (resolved.length >= 2) break;
       }
 
-      if (resolved.length >= 2) {
-        return {
-          parentAId: resolved[0].parentId,
-          hostA: resolved[0].host,
-          parentBId: resolved[1].parentId,
-          hostB: resolved[1].host,
-        };
+      const distinctResolved = resolved.filter((entry, index) =>
+        resolved.findIndex((candidate) => candidate.parentId === entry.parentId) === index
+      );
+
+      if (distinctResolved.length >= 2) {
+        let bestPair:
+          | { parentAId: string; hostA: HostEntry; parentBId: string; hostB: HostEntry; score: number }
+          | null = null;
+
+        for (let i = 0; i < distinctResolved.length; i++) {
+          for (let j = i + 1; j < distinctResolved.length; j++) {
+            const hostEntryA = distinctResolved[i];
+            const hostEntryB = distinctResolved[j];
+            const pairing = pickBracePairing(hostEntryA.host, hostEntryB.host, pA, pB);
+            if (!pairing) continue;
+
+            const projPointA = new THREE.Vector3(
+              pairing.projA.pointOnLine.x,
+              pairing.projA.pointOnLine.y,
+              pairing.projA.pointOnLine.z,
+            );
+            const projPointB = new THREE.Vector3(
+              pairing.projB.pointOnLine.x,
+              pairing.projB.pointOnLine.y,
+              pairing.projB.pointOnLine.z,
+            );
+            const score = pairing.attachPointA.distanceTo(projPointA) + pairing.attachPointB.distanceTo(projPointB);
+
+            if (!bestPair || score < bestPair.score) {
+              bestPair = {
+                parentAId: hostEntryA.parentId,
+                hostA: hostEntryA.host,
+                parentBId: hostEntryB.parentId,
+                hostB: hostEntryB.host,
+                score,
+              };
+            }
+          }
+        }
+
+        if (bestPair) {
+          return {
+            parentAId: bestPair.parentAId,
+            hostA: bestPair.hostA,
+            parentBId: bestPair.parentBId,
+            hostB: bestPair.hostB,
+          };
+        }
       }
 
       // Same-host fallback when two endpoints explicitly reference the same host.
@@ -924,7 +966,9 @@ export function convertLysData(data: LysData, settings: SupportSettings, mesh?: 
     }
 
     for (const { id, s, parentIds } of braceCandidates) {
-      const resolvedBraceHosts = resolveBraceParentHosts(s, parentIds);
+      const pA = transformObjectPoint(s.base);
+      const pB = transformObjectPoint(s.tip);
+      const resolvedBraceHosts = resolveBraceParentHosts(s, parentIds, pA, pB);
       if (!resolvedBraceHosts) {
         const candidates = getParentHostCandidates(s, parentIds);
         const candidateText = candidates.length > 0 ? candidates.join(', ') : '(none)';
@@ -939,9 +983,6 @@ export function convertLysData(data: LysData, settings: SupportSettings, mesh?: 
         hostB,
       } = resolvedBraceHosts;
 
-      const pA = transformObjectPoint(s.base);
-      const pB = transformObjectPoint(s.tip);
-
       let pairing = pickBracePairing(hostA, hostB, pA, pB);
       if (!pairing) continue;
 
@@ -950,6 +991,19 @@ export function convertLysData(data: LysData, settings: SupportSettings, mesh?: 
       // can visually squash braces when hosts clamp endpoints near segment boundaries.
       let knotPosA: Vec3 = { x: pairing.attachPointA.x, y: pairing.attachPointA.y, z: pairing.attachPointA.z };
       let knotPosB: Vec3 = { x: pairing.attachPointB.x, y: pairing.attachPointB.y, z: pairing.attachPointB.z };
+
+      const baseSettings = s.settings?.base;
+      const braceTipBodyDiameter = s.settings?.tip?.diameter;
+      const braceBaseTipBodyDiameter = s.settings?.baseTip?.diameter;
+      const braceDiameter =
+        (Number.isFinite(braceTipBodyDiameter as number) && (braceTipBodyDiameter as number) > 0
+          ? (braceTipBodyDiameter as number)
+          : Number.isFinite(braceBaseTipBodyDiameter as number) && (braceBaseTipBodyDiameter as number) > 0
+            ? (braceBaseTipBodyDiameter as number)
+            : Number.isFinite(baseSettings?.joinDiameter as number) && (baseSettings?.joinDiameter as number) > 0
+              ? (baseSettings?.joinDiameter as number)
+              : 0.5);
+      const braceJointDiameter = getJointDiameter(braceDiameter);
 
       const parentBaseId = typeof s.parentBaseId === 'string' ? s.parentBaseId : null;
       const parentTipId = typeof s.parentTipId === 'string' ? s.parentTipId : null;
@@ -996,6 +1050,8 @@ export function convertLysData(data: LysData, settings: SupportSettings, mesh?: 
         parentShaftId: pairing.projA.parentShaftId,
         t: pairing.projA.t,
         pos: knotPosA,
+        diameter: braceJointDiameter,
+        _importHint: 'braceImported',
       };
 
       const knotB: Knot = {
@@ -1003,21 +1059,11 @@ export function convertLysData(data: LysData, settings: SupportSettings, mesh?: 
         parentShaftId: pairing.projB.parentShaftId,
         t: pairing.projB.t,
         pos: knotPosB,
+        diameter: braceJointDiameter,
+        _importHint: 'braceImported',
       };
 
       result.knots.push(knotA, knotB);
-
-      const baseSettings = s.settings?.base;
-      const braceTipBodyDiameter = s.settings?.tip?.diameter;
-      const braceBaseTipBodyDiameter = s.settings?.baseTip?.diameter;
-      const braceDiameter =
-        (Number.isFinite(braceTipBodyDiameter as number) && (braceTipBodyDiameter as number) > 0
-          ? (braceTipBodyDiameter as number)
-          : Number.isFinite(braceBaseTipBodyDiameter as number) && (braceBaseTipBodyDiameter as number) > 0
-            ? (braceBaseTipBodyDiameter as number)
-            : Number.isFinite(baseSettings?.joinDiameter as number) && (baseSettings?.joinDiameter as number) > 0
-              ? (baseSettings?.joinDiameter as number)
-              : 0.5);
 
       const brace: Brace = {
         id: uuidv4(),

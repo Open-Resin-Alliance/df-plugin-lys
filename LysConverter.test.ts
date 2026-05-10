@@ -651,6 +651,15 @@ describe('LysConverter', () => {
 
         assert.ok((Math.abs(x1) < 1 && Math.abs(x2 - 20) < 1) || (Math.abs(x1 - 20) < 1 && Math.abs(x2) < 1),
             'Brace knots should match parent positions');
+
+        assert.ok(Number.isFinite(startKnot.diameter as number) && Number.isFinite(endKnot.diameter as number),
+            'Imported brace knots should carry explicit diameter metadata');
+        assert.strictEqual(startKnot._importHint, 'braceImported',
+            'Imported brace start knot should be marked for brace-uniform normalization');
+        assert.strictEqual(endKnot._importHint, 'braceImported',
+            'Imported brace end knot should be marked for brace-uniform normalization');
+        assert.ok(Math.abs((startKnot.diameter as number) - (endKnot.diameter as number)) < 1e-6,
+            'Imported brace host knots should start with a uniform joint diameter');
     });
 
     it('should keep authored brace endpoint positions for inferred two-parent braces (no explicit endpoint hints)', () => {
@@ -957,6 +966,108 @@ describe('LysConverter', () => {
         const sortedByX = [startKnot!, endKnot!].sort((a, b) => a.pos.x - b.pos.x);
         assert.ok(Math.abs(sortedByX[0].pos.x - 2.8) < 1e-6 && Math.abs(sortedByX[1].pos.x - 17.2) < 1e-6,
             'Misordered-parent brace should keep authored endpoint mapping after host resolution');
+    });
+
+    it('should choose the best brace host pair when parentId contains extra valid hosts', () => {
+        const EXTRA_HOST_BRACE_PARENT_DATA = {
+            objects: {
+                present: {
+                    byId: {
+                        o1: {
+                            id: 'o1',
+                            formerCenter: { x: 0, y: 0, z: 0 },
+                            position: { x: 0, y: 0, z: 0 },
+                            rotation: { x: 0, y: 0, z: 0 },
+                            scale: { x: 1, y: 1, z: 1 },
+                        }
+                    }
+                }
+            },
+            supports: {
+                present: {
+                    byId: {
+                        s_root_left: {
+                            id: 's_root_left',
+                            type: 1,
+                            base: { x: 0, y: 0, z: 0 },
+                            tip: { x: 4, y: 0, z: 20 },
+                            parentId: [],
+                            objectIdTip: 'o1',
+                            objectIdBase: 'o1',
+                            settings: { tip: { length: 3 } },
+                        },
+                        s_root_center: {
+                            id: 's_root_center',
+                            type: 1,
+                            base: { x: 10, y: 0, z: 0 },
+                            tip: { x: 10, y: 0, z: 20 },
+                            parentId: [],
+                            objectIdTip: 'o1',
+                            objectIdBase: 'o1',
+                            settings: { tip: { length: 3 } },
+                        },
+                        s_root_right: {
+                            id: 's_root_right',
+                            type: 1,
+                            base: { x: 20, y: 0, z: 0 },
+                            tip: { x: 16, y: 0, z: 20 },
+                            parentId: [],
+                            objectIdTip: 'o1',
+                            objectIdBase: 'o1',
+                            settings: { tip: { length: 3 } },
+                        },
+                        s_brace_extra_host: {
+                            id: 's_brace_extra_host',
+                            type: 0,
+                            base: { x: 2.8, y: 0, z: 16 },
+                            tip: { x: 17.2, y: 0, z: 16 },
+                            // Includes an extra *valid* center host first; importer should still
+                            // choose left+right by best geometric pairing.
+                            parentId: ['s_root_center', 's_root_left', 's_root_right'],
+                            parentBaseId: null,
+                            parentTipId: null,
+                            objectIdTip: 'o1',
+                            objectIdBase: 'o1',
+                            settings: { base: { joinDiameter: 0.5 } },
+                        },
+                    }
+                }
+            }
+        };
+
+        const result = LysConverter.convert(EXTRA_HOST_BRACE_PARENT_DATA as any, createDefaultSettings());
+        assert.strictEqual(result.braces.length, 1, 'Expected one brace from parent list with extra valid host');
+        assert.strictEqual(result.trunks.length, 3, 'Expected three candidate host trunks');
+
+        const brace = result.braces[0];
+        const startKnot = result.knots.find(k => k.id === brace.startKnotId);
+        const endKnot = result.knots.find(k => k.id === brace.endKnotId);
+        assert.ok(startKnot && endKnot, 'Expected brace host knots to exist');
+
+        const rootsById = new Map(result.roots.map((root) => [root.id, root] as const));
+        const trunksByRootX = result.trunks
+            .map((trunk) => ({
+                trunk,
+                rootX: rootsById.get(trunk.rootId)?.transform.pos.x ?? Number.NaN,
+            }))
+            .sort((a, b) => a.rootX - b.rootX);
+
+        const leftTrunk = trunksByRootX[0].trunk;
+        const centerTrunk = trunksByRootX[1].trunk;
+        const rightTrunk = trunksByRootX[2].trunk;
+
+        const leftSegmentIds = new Set(leftTrunk.segments.map((segment) => segment.id));
+        const centerSegmentIds = new Set(centerTrunk.segments.map((segment) => segment.id));
+        const rightSegmentIds = new Set(rightTrunk.segments.map((segment) => segment.id));
+
+        const knotSegmentIds = [startKnot!.parentShaftId, endKnot!.parentShaftId];
+
+        assert.ok(knotSegmentIds.some((segmentId) => leftSegmentIds.has(segmentId)),
+            'Brace should attach to left trunk when extra valid hosts exist');
+        assert.ok(knotSegmentIds.some((segmentId) => rightSegmentIds.has(segmentId)),
+            'Brace should attach to right trunk when extra valid hosts exist');
+        assert.ok(knotSegmentIds.every((segmentId) => !centerSegmentIds.has(segmentId)),
+            'Brace should not bind to center trunk just because it appears first in parentId list');
     });
 
     it('should bind braces to tip-side host segments when closest projection is a far endpoint clamp', () => {
