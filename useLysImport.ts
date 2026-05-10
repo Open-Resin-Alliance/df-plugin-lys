@@ -7,19 +7,33 @@ import { computeLowestZ } from '@/utils/geometry';
 import { eulerFromGlobalEuler, quaternionFromGlobalEulerDegrees } from '@/utils/rotation';
 import { generateUuid } from '@/utils/uuid';
 
+/**
+ * Legacy hook-based LYS import path retained for compatibility with existing scene flows.
+ *
+ * This path performs parser+converter orchestration and returns geometry + transform + support payload,
+ * leaving scene insertion to the caller.
+ */
+
 function generateImportId(): string {
     return generateUuid();
 }
 
+/**
+ * Normalizes object rotation for conversion phase.
+ *
+ * Z rotation is intentionally deferred to a post-conversion pass to avoid
+ * parent-host projection drift while supports are being assembled.
+ */
 function normalizeLysRotation(rotation: { x?: number; y?: number; z?: number } | null | undefined) {
     const x = Number.isFinite(rotation?.x) ? (rotation?.x as number) : 0;
     const y = Number.isFinite(rotation?.y) ? (rotation?.y as number) : 0;
-    // const z = Number.isFinite(rotation?.z) ? (rotation?.z as number) : 0;
-    // For now, ignore Z rotation from LYS scene data as we don't have a clear strategy for applying it to the supports
-    // We can consider adding it back in the future if we implement a more complete support transform that includes rotation.
+    // Z rotation is intentionally handled in a later post-conversion pass.
     return { x, y, z: 0 };
 }
 
+/**
+ * Applies model-lift-derived Z offset to converted support payload.
+ */
 function applySupportZOffset(importData: any, deltaZ: number) {
     if (!importData || !Number.isFinite(deltaZ) || Math.abs(deltaZ) < 1e-6) return;
 
@@ -41,7 +55,7 @@ function applySupportZOffset(importData: any, deltaZ: number) {
                 if (seg?.bottomJoint?.id === socketJointId) shiftJoint(seg.bottomJoint);
                 if (seg?.topJoint?.id === socketJointId) shiftJoint(seg.topJoint);
             } else {
-                // Legacy fallback: if socket IDs are missing, preserve previous behavior.
+                // Compatibility path for payloads without socket joint ids.
                 shiftJoint(seg?.bottomJoint);
                 shiftJoint(seg?.topJoint);
             }
@@ -100,6 +114,9 @@ function applySupportZOffset(importData: any, deltaZ: number) {
     }
 }
 
+/**
+ * Applies world XY offset to converted support payload.
+ */
 function applySupportXYOffset(importData: any, deltaX: number, deltaY: number) {
     if (!importData) return;
     if ((!Number.isFinite(deltaX) || Math.abs(deltaX) < 1e-6) && (!Number.isFinite(deltaY) || Math.abs(deltaY) < 1e-6)) return;
@@ -232,6 +249,9 @@ export function useLysImport() {
     // We don't store geometry in state here long-term, 
     // we return it to the caller (useSceneManager) to handle.
 
+    /**
+     * Imports a single `.lys` scene file and returns normalized model/support payloads.
+     */
     const importFile = useCallback(async (file: File, options?: LysImportOptions) => {
         setIsLoading(true);
         setError(null);
@@ -244,6 +264,7 @@ export function useLysImport() {
             : 0;
 
         try {
+            // Stage 1: parse container + decode scene payload.
             console.log("[useLysImport] Starting LYS Import...");
             const data = await LysParser.parse(file);
 
@@ -261,6 +282,7 @@ export function useLysImport() {
             };
 
             if (data.sceneData && data.sceneData.objects && data.sceneData.supports) {
+                // Stage 2: prepare converter input (strip Z rotation in object transforms).
                 const sceneDataForConvert = JSON.parse(JSON.stringify(data.sceneData));
                 const convertObjects = sceneDataForConvert?.objects?.present?.byId || {};
                 for (const key of Object.keys(convertObjects)) {
@@ -281,7 +303,7 @@ export function useLysImport() {
                     }
                 }
 
-                // Final Fallback: Use the first object if nothing else matches
+                // Final selection fallback: use the first available object.
                 if (!targetObj) {
                     const firstKey = Object.keys(objects)[0];
                     if (firstKey) {
@@ -290,8 +312,8 @@ export function useLysImport() {
                     }
                 }
 
-                // Build a ghost mesh with LYS scene transforms for support tip raycasting.
-                // This mirrors the legacy v102 conversion flow that produced accurate trunk tips.
+                // Build a ghost mesh with LYS scene transforms for support-tip raycasting.
+                // Stage 3: build transformed ghost mesh for tip/contact raycasts.
                 let raycastMesh: THREE.Mesh | undefined;
                 let ghostMaterial: THREE.Material | undefined;
                 if (targetObj) {
@@ -318,9 +340,11 @@ export function useLysImport() {
                     raycastMesh = mesh;
                 }
 
+                // Stage 4: convert supports.
                 dragonfruitData = LysConverter.convert(sceneDataForConvert, settings, raycastMesh);
 
                 if (targetObj && dragonfruitData) {
+                    // Stage 5: align support Z with resolved transformed model floor.
                     const position = targetObj.position || { x: 0, y: 0, z: 0 };
                     const scale = targetObj.scale || { x: 1, y: 1, z: 1 };
                     const rot = normalizeLysRotation(targetObj.rotation);
@@ -354,6 +378,7 @@ export function useLysImport() {
                 }
 
                 if (dragonfruitData) {
+                    // Stage 6: apply global model ownership id and deferred transforms.
                     LysConverter.reassignModelId(dragonfruitData, importedModelId);
 
                     // Apply Z rotation as a post-conversion world-space transform so that all

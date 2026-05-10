@@ -1,5 +1,13 @@
 import type { ComplexPluginDefinition } from '@/features/plugins/complexPluginContracts';
 
+/**
+ * Built-in plugin descriptor for DragonFruit's LYS scene-file import capability.
+ *
+ * Notes:
+ * - This plugin is file-type focused (no runtime protocol / encoder / network surface).
+ * - The warning text intentionally sets compatibility expectations before import.
+ */
+
 const PLUGIN_DEFINITION: ComplexPluginDefinition = {
   id: 'lys-import',
   manifest: {

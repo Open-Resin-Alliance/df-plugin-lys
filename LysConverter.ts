@@ -7,8 +7,16 @@ import { SupportSettings } from '@/supports/Settings';
 import { convertLysData } from './converter/convertLysData';
 import { LysData } from './converter/types';
 
+/**
+ * High-level adapter between raw parsed LYS data and DragonFruit import payloads.
+ *
+ * This class intentionally keeps conversion orchestration separate from parser logic
+ * and scene integration hooks.
+ */
+
 export class LysConverter {
 
+  /** Produces compact entity counts for debug logs and diagnostics. */
   private static summarizeConvertedData(data: DragonfruitImportFormat) {
     return {
       roots: data.roots?.length ?? 0,
@@ -23,6 +31,7 @@ export class LysConverter {
     };
   }
 
+  /** Collects every model id referenced anywhere inside converted support payloads. */
   private static collectModelIds(data: DragonfruitImportFormat): string[] {
     const ids = new Set<string>();
     for (const root of data.roots || []) if (root?.modelId) ids.add(root.modelId);
@@ -39,6 +48,10 @@ export class LysConverter {
     return [...ids];
   }
 
+  /**
+   * Rewrites all converted entities to a single target model id.
+   * Used after conversion when importing into a freshly created scene model.
+   */
   static reassignModelId(data: DragonfruitImportFormat, modelId: string): void {
     if (!modelId) return;
 
@@ -64,6 +77,9 @@ export class LysConverter {
     });
   }
 
+  /**
+   * Applies world-space XY offset to every converted support entity.
+   */
   static applyWorldXYPlacement(data: DragonfruitImportFormat, offsetX: number, offsetY: number): void {
     if (!Number.isFinite(offsetX) || !Number.isFinite(offsetY)) return;
     if (Math.abs(offsetX) < 1e-8 && Math.abs(offsetY) < 1e-8) return;
@@ -160,6 +176,13 @@ export class LysConverter {
     }
   }
 
+  /**
+   * Converts parsed LYS scene payload into DragonFruit's import format.
+   *
+   * @param data Parsed LYS scene data.
+   * @param settings Active support settings profile used for defaults.
+   * @param mesh Optional transformed mesh used for contact/raycast alignment.
+   */
   static convert(data: LysData, settings: SupportSettings, mesh?: THREE.Mesh): DragonfruitImportFormat {
     const objectIds = Object.keys((data as any)?.objects?.present?.byId ?? {});
     const supportIds = Object.keys((data as any)?.supports?.present?.byId ?? {});
@@ -196,12 +219,14 @@ export class LysConverter {
     pivotY: number,
     rotZRad: number,
   ): void {
+    // Guard against no-op / non-finite rotation requests.
     if (!Number.isFinite(rotZRad) || Math.abs(rotZRad) < 1e-8) return;
     const px = Number.isFinite(pivotX) ? pivotX : 0;
     const py = Number.isFinite(pivotY) ? pivotY : 0;
     const cosZ = Math.cos(rotZRad);
     const sinZ = Math.sin(rotZRad);
 
+    // Position rotation around world-space pivot in XY plane.
     const rotPos = (pos: { x: number; y: number; z?: number }) => {
       const dx = pos.x - px;
       const dy = pos.y - py;
@@ -209,6 +234,7 @@ export class LysConverter {
       pos.y = dx * sinZ + dy * cosZ + py;
     };
 
+    // Direction vectors are rotated about origin (no pivot translation).
     const rotDir = (dir: { x: number; y: number; z: number }) => {
       const nx = dir.x * cosZ - dir.y * sinZ;
       const ny = dir.x * sinZ + dir.y * cosZ;
@@ -216,6 +242,7 @@ export class LysConverter {
       dir.y = ny;
     };
 
+    // Joints can be shared across segments; rotate each joint only once.
     const rotatedJointIds = new Set<string>();
     const rotJoint = (joint?: { id?: string; pos: { x: number; y: number; z: number } }) => {
       if (!joint?.pos) return;

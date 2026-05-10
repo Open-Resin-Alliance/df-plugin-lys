@@ -45,8 +45,7 @@ const MOCK_LYS_DATA = {
                     },
                     parentId: ['s1'] // Linked to s1
                 },
-                // 3. BRACE (Connecting s1 and s2) -> This might need 2 roots to be realistic brace
-                // Let's make a brace between s1 and a new root s3
+                // 3. BRACE scenario: connect s1 to a second root (s3)
                 's3': {
                     id: 's3',
                     base: { x: 20, y: 0, z: 0 },

@@ -26,6 +26,9 @@ function generateImportId(): string {
 
 interface LysVector { x: number; y: number; z: number }
 
+/**
+ * Per-object transform values authored in the LYS scene payload.
+ */
 interface LysObjectTransform {
   center: LysVector;
   position: LysVector;
@@ -59,7 +62,7 @@ function extractObjectTransform(json: any): LysObjectTransform | null {
   const objects = json?.objects?.present?.byId;
   if (!objects) return null;
 
-  // Find target object (o15 or first with supports)
+  // Keep legacy object selection semantics: prefer `o15`, then first object with supports.
   let targetObj = objects['o15'];
   if (!targetObj) {
     for (const key in objects) {
@@ -92,6 +95,14 @@ function extractObjectTransform(json: any): LysObjectTransform | null {
 // Hook
 // ---------------------------------------------------------------------------
 
+/**
+ * Two-phase importer for legacy LYS JSON + STL workflows.
+ *
+ * State machine:
+ * - idle
+ * - awaiting_stl
+ * - processing
+ */
 export function useLysSceneImport() {
   const [phase, setPhase] = useState<ImportPhase>('idle');
   const [error, setError] = useState<string | null>(null);
@@ -114,7 +125,7 @@ export function useLysSceneImport() {
         return false;
       }
 
-      // Store for later
+      // Persist parsed JSON + transform for second phase (STL selection).
       pendingImportRef.current = { json, objectTransform: transform };
       setPhase('awaiting_stl');
 
@@ -147,13 +158,13 @@ export function useLysSceneImport() {
       setPhase('processing');
       setError(null);
 
-      // Load STL geometry
+      // Stage 1: parse STL payload into normalized in-memory geometry.
       const url = URL.createObjectURL(file);
       const geometry = await loadStlGeometry(url, {
         nativeProcessingMode: 'none',
       });
 
-      // Calculate transform from LYS scene data
+      // Stage 2: compute runtime model transform from LYS auth data.
       const { center, position, scale, rotation } = pending.objectTransform;
       const deg2rad = Math.PI / 180;
 
@@ -194,7 +205,7 @@ export function useLysSceneImport() {
         'XYZ'
       );
 
-      // Create a temporary mesh for raycasting (Surface Alignment)
+      // Stage 3: build transformed ghost mesh for support tip surface alignment.
       // For support reconstruction, match Stage A transform policy:
       // pivot + scale + rotation + position.z (world XY deferred).
 
@@ -215,10 +226,10 @@ export function useLysSceneImport() {
       ghostGroup.add(mesh);
       ghostGroup.updateMatrixWorld(true);
 
-      // CRITICAL: Update bounding sphere for Raycaster optimization
+      // Update bounding sphere for raycaster efficiency.
       mesh.geometry.computeBoundingSphere();
 
-      // Convert supports
+      // Stage 4: convert supports and load them into support state.
       console.log('[LysSceneImport] Converting supports...');
       const importedModelId = generateImportId();
 
@@ -247,7 +258,7 @@ export function useLysSceneImport() {
         supports: converted.trunks.length
       });
 
-      // Cleanup
+      // Stage 5: clear pending state and complete callback handoff.
       pendingImportRef.current = null;
       setPhase('idle');
 
@@ -257,7 +268,7 @@ export function useLysSceneImport() {
     } catch (err) {
       console.error('[LysSceneImport] Failed to process STL:', err);
       setError('Failed to load STL file');
-      setPhase('awaiting_stl'); // Stay in awaiting state so user can retry
+      setPhase('awaiting_stl'); // Remain in awaiting state so the user can retry.
       return false;
     }
   }, []);

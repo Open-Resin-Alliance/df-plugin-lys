@@ -39,6 +39,17 @@ import { createContactAssembly } from './contactAssembly';
 import { HostEntry, LysData, LysSupport } from './types';
 import { quaternionFromGlobalEulerDegrees } from '@/utils/rotation';
 
+/**
+ * Core LYS -> DragonFruit conversion routine.
+ *
+ * High-level phases:
+ * 1) group supports by owning object
+ * 2) resolve object transforms for point/normal conversion
+ * 3) classify supports by topology (root/branch/brace/leaf/twig/stick/kickstand)
+ * 4) create converted entities while preserving host relationships
+ * 5) apply per-object world XY placement to converted slices
+ */
+
 export function convertLysData(data: LysData, settings: SupportSettings, mesh?: THREE.Mesh): DragonfruitImportFormat {
   const result: DragonfruitImportFormat & { kickstands: KickstandBuildResult[] } = {
     version: 1,
@@ -65,6 +76,10 @@ export function convertLysData(data: LysData, settings: SupportSettings, mesh?: 
 
   const objects = data.objects.present.byId;
   const supports = data.supports.present.byId;
+
+  // -------------------------------------------------------------------------
+  // Phase 1: group supports by resolved owner object id.
+  // -------------------------------------------------------------------------
   const fallbackObjectId = pickFallbackObjectId(objects);
   if (!fallbackObjectId) {
     console.warn('[LysConverter] No object found in scene data');
@@ -92,6 +107,9 @@ export function convertLysData(data: LysData, settings: SupportSettings, mesh?: 
   let didSetMetaCenter = false;
 
   for (const [objectId, supportsForObject] of supportsByObjectId) {
+    // -----------------------------------------------------------------------
+    // Phase 2 (per object): resolve transform helpers and parent-host lookups.
+    // -----------------------------------------------------------------------
     const targetObj = objects[objectId];
     if (!targetObj) {
       console.warn(`[LysConverter] Object ${objectId} was selected for support ownership but does not exist. Skipping.`);
@@ -326,6 +344,9 @@ export function convertLysData(data: LysData, settings: SupportSettings, mesh?: 
     const braceCandidates: { id: string; s: LysSupport; parentIds: string[] }[] = [];
     const kickstandCandidates: { id: string; s: LysSupport; parentIds: string[] }[] = [];
 
+    // -----------------------------------------------------------------------
+    // Phase 3: classify supports into conversion buckets.
+    // -----------------------------------------------------------------------
     for (const { id, s } of supportsForObject) {
       const parentIds = inferParentIds(s);
       const supportHasChildren = hasChildren(id);
@@ -386,6 +407,9 @@ export function convertLysData(data: LysData, settings: SupportSettings, mesh?: 
       return tipDefaults.contactDiameterMm;
     };
 
+    // -----------------------------------------------------------------------
+    // Phase 4A: convert floating two-contact twigs.
+    // -----------------------------------------------------------------------
     for (const { s } of twigCandidates) {
       if (!s.base || !s.tip) continue;
 
@@ -454,6 +478,9 @@ export function convertLysData(data: LysData, settings: SupportSettings, mesh?: 
       result.twigs?.push(twig);
     }
 
+    // -----------------------------------------------------------------------
+    // Phase 4B: convert floating two-cone sticks.
+    // -----------------------------------------------------------------------
     for (const { s } of stickCandidates) {
       if (!s.base || !s.tip) continue;
 
@@ -521,6 +548,9 @@ export function convertLysData(data: LysData, settings: SupportSettings, mesh?: 
       result.sticks?.push(stick);
     }
 
+    // -----------------------------------------------------------------------
+    // Phase 4C: convert roots/trunks and register host entries.
+    // -----------------------------------------------------------------------
     for (const { id, s } of rootCandidates) {
       if (!s.base || !s.tip) continue;
 
@@ -629,6 +659,9 @@ export function convertLysData(data: LysData, settings: SupportSettings, mesh?: 
     const unresolvedBranches = [...branchCandidates];
     let madeProgress = true;
 
+    // -----------------------------------------------------------------------
+    // Phase 4D: iteratively resolve branches against available parent hosts.
+    // -----------------------------------------------------------------------
     while (unresolvedBranches.length > 0 && madeProgress) {
       madeProgress = false;
 
@@ -853,6 +886,9 @@ export function convertLysData(data: LysData, settings: SupportSettings, mesh?: 
       console.warn(`[LysConverter] Child ${id} (object ${objectId}) refers to unknown/unprocessed parent(s) ${candidateText}. Skipping.`);
     });
 
+    // -----------------------------------------------------------------------
+    // Phase 4E: convert kickstands after parent hosts are available.
+    // -----------------------------------------------------------------------
     for (const { id, s, parentIds } of kickstandCandidates) {
       if (!s.base || !s.tip || parentIds.length === 0) continue;
 
@@ -965,6 +1001,9 @@ export function convertLysData(data: LysData, settings: SupportSettings, mesh?: 
       });
     }
 
+    // -----------------------------------------------------------------------
+    // Phase 4F: convert braces using two-parent host pairing.
+    // -----------------------------------------------------------------------
     for (const { id, s, parentIds } of braceCandidates) {
       const pA = transformObjectPoint(s.base);
       const pB = transformObjectPoint(s.tip);
@@ -1078,6 +1117,9 @@ export function convertLysData(data: LysData, settings: SupportSettings, mesh?: 
       result.braces.push(brace);
     }
 
+    // -----------------------------------------------------------------------
+    // Phase 5: apply object world XY translation to this object's slice.
+    // -----------------------------------------------------------------------
     applyWorldXYPlacementToSlice(result, sliceStart, pos.x, pos.y);
   }
 

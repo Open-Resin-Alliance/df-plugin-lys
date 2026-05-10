@@ -21,6 +21,19 @@ import {
   LysVector,
 } from './types';
 
+/**
+ * Helper utilities used by the LYS converter.
+ *
+ * This module focuses on:
+ * - parent/ownership inference
+ * - support classification (root/branch/leaf/twig/stick/brace)
+ * - geometric projection helpers for host attachment
+ * - per-slice XY placement utilities for converted entities
+ */
+
+/**
+ * Extracts parent identifiers from the broad set of parent-like fields seen in LYS variants.
+ */
 export function extractParentIds(s: any): string[] {
   const candidate = s?.parentId ?? s?.parentIds ?? s?.parents ?? s?.parent ?? s?.hostId ?? s?.hostIds;
   if (Array.isArray(candidate)) {
@@ -42,6 +55,9 @@ export function extractParentIds(s: any): string[] {
   return [];
 }
 
+/**
+ * Returns explicit parent ids when available; otherwise infers from endpoint-specific parent hints.
+ */
 export function inferParentIds(s: any): string[] {
   const explicit = extractParentIds(s);
   if (explicit.length > 0) return explicit;
@@ -56,18 +72,24 @@ export function inferParentIds(s: any): string[] {
   return inferred;
 }
 
+/** Converts loose truthy flag representations into a strict boolean. */
 export function isTruthyFlag(value: unknown): boolean {
   return value === true || value === 1 || value === '1' || value === 'true';
 }
 
+/** Determines whether a support is marked as a mini-support in source data. */
 export function isMiniSupport(s: LysSupport): boolean {
   return isTruthyFlag((s as any)?.mini);
 }
 
+/** Selects the most relevant tip settings block from available LYS variants. */
 export function pickContactTipSettings(s: LysSupport): LysSupportSettings['tip'] | LysSupportSettings['baseTip'] | undefined {
   return s.settings?.tip ?? s.settings?.baseTip;
 }
 
+/**
+ * Chooses which endpoint should be treated as the contact tip based on proximity.
+ */
 export function inferLeafTipEndpoint(
   tipPoint: THREE.Vector3,
   basePoint: THREE.Vector3,
@@ -78,6 +100,9 @@ export function inferLeafTipEndpoint(
   return distToTipSq <= distToBaseSq ? 'tip' : 'base';
 }
 
+/**
+ * Determines endpoint diameter with priority ordering from endpoint/body/base settings.
+ */
 export function pickLeafEndpointDiameter(
   s: LysSupport,
   endpoint: 'base' | 'tip',
@@ -104,6 +129,7 @@ export function pickLeafEndpointDiameter(
   return fallback;
 }
 
+/** Returns true when a normal vector is finite and non-degenerate. */
 export function hasValidNormal(v?: LysVector): boolean {
   if (!v) return false;
   if (!Number.isFinite(v.x) || !Number.isFinite(v.y) || !Number.isFinite(v.z)) return false;
@@ -124,6 +150,7 @@ export function isTwigCandidate(
   parentIds: string[],
   stickVsTwigCutoffMm: number,
 ): boolean {
+  // Twig candidates are floating two-normal supports below the configured length threshold.
   if (parentIds.length !== 0) return false;
 
   const supportType = (s as any)?.type;
@@ -155,6 +182,7 @@ export function isStickCandidate(
   parentIds: string[],
   stickVsTwigCutoffMm?: number,
 ): boolean {
+  // Stick candidates are floating two-normal supports above the twig threshold.
   if (parentIds.length !== 0) return false;
   if (isMiniSupport(s)) return false;
 
@@ -191,6 +219,7 @@ export function pickStickEndpointTipSettings(
 }
 
 export function pickFallbackObjectId(objects: Record<string, LysObject>): string | null {
+  // Keep o15 precedence to match historical LYS converter behavior where applicable.
   if (objects['o15']) return 'o15';
 
   for (const [objectId, objectData] of Object.entries(objects)) {
@@ -222,6 +251,8 @@ export function resolveSupportOwnerId(
   objects: Record<string, LysObject>,
   fallbackObjectId: string,
 ): string {
+  // Resolve support ownership by preferring tip-side object, then base-side object,
+  // then deterministic fallback object id.
   const tipObjectIdRaw = normalizeObjectId(support.objectIdTip);
   const baseObjectIdRaw = normalizeObjectId(support.objectIdBase);
 

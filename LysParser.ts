@@ -1,8 +1,34 @@
 import * as THREE from 'three';
 import { decode } from '@msgpack/msgpack';
 
-// Default App ID Key for decryption (from python script)
-const DEFAULT_APP_ID = "a8ee1146-8d03-4b69-8a67-59009a3f9ee7";
+/**
+ * LYS container parser.
+ *
+ * Pipeline:
+ * 1) locate and parse JSON manifest header
+ * 2) resolve binary payload spans from manifest offsets
+ * 3) decode protected scene payload (`scene.bin`)
+ * 4) parse geometry payload(s) into Three.js geometries
+ */
+
+const LYS_KEY_OBFUSCATION = 'DragonFruitFTW';
+const LYS_DEFAULT_APP_ID_XOR: number[] = [
+    0x25, 0x4a, 0x04, 0x02, 0x5e, 0x5f, 0x72, 0x44, 0x58, 0x51, 0x10, 0x76,
+    0x67, 0x7a, 0x70, 0x10, 0x57, 0x5e, 0x42, 0x56, 0x27, 0x44, 0x42, 0x44,
+    0x41, 0x7f, 0x64, 0x67, 0x7d, 0x13, 0x52, 0x01, 0x56, 0x0b, 0x23, 0x45,
+];
+
+function xorDeobfuscateToUtf8(input: number[], mask: string): string {
+    const maskBytes = new TextEncoder().encode(mask);
+    const out = new Uint8Array(input.length);
+    for (let i = 0; i < input.length; i += 1) {
+        out[i] = input[i] ^ maskBytes[i % maskBytes.length];
+    }
+    return new TextDecoder('utf-8').decode(out);
+}
+
+// NOTE: This is light obfuscation for source hygiene, not cryptographic protection.
+const DEFAULT_APP_ID = xorDeobfuscateToUtf8(LYS_DEFAULT_APP_ID_XOR, LYS_KEY_OBFUSCATION);
 
 export interface LysData {
     geometry: THREE.BufferGeometry;
@@ -22,7 +48,9 @@ export class LysParser {
         const data = new Uint8Array(buffer);
         const textDecoder = new TextDecoder('utf-8');
 
-        // 1. Extract Manifest (JSON)
+        // -------------------------------------------------------------------
+        // Stage 1: extract and parse JSON manifest header.
+        // -------------------------------------------------------------------
         const { start, end } = this.findJsonHeader(data);
         const manifestStr = textDecoder.decode(data.subarray(start, end));
         let manifest: any;
@@ -33,7 +61,7 @@ export class LysParser {
             throw new Error(`Failed to parse LYS manifest: ${e}`);
         }
 
-        // Data section starts after JSON header (skip null padding)
+        // Data section starts after JSON header and optional null padding.
         let dataStart = end;
         while (dataStart < data.length && data[dataStart] === 0) {
             dataStart++;
@@ -55,7 +83,9 @@ export class LysParser {
         // All non-scene .bin blobs keyed by their filename stem (e.g. "o15" from "o15.bin")
         const allGeomBlobs = new Map<string, Uint8Array>();
 
-        // 2. Locate Files in Blob
+        // -------------------------------------------------------------------
+        // Stage 2: resolve declared file spans (`scene.bin`, `o*.bin`, etc.).
+        // -------------------------------------------------------------------
         for (const [fname, info] of Object.entries(filesInfo) as [string, any][]) {
             const name = fname.toLowerCase();
             const offset = Number(info.offset || 0);
@@ -71,7 +101,7 @@ export class LysParser {
 
             if (name === 'scene.bin') {
                 if (absOffset + size > data.length) {
-                    console.error(`[LysParser] CRITICAL: scene.bin bounds [${absOffset}, ${absOffset + size}] exceed file size ${data.length}`);
+                    console.error(`[LysParser] scene.bin bounds [${absOffset}, ${absOffset + size}] exceed file size ${data.length}`);
                 }
                 sceneBlob = data.subarray(absOffset, absOffset + size);
             } else if (name.endsWith('.bin')) {
@@ -95,38 +125,42 @@ export class LysParser {
             throw new Error("LysParser: No geometry .bin file found");
         }
 
-        // 3. Decrypt & Decode Scene Data
+        // -------------------------------------------------------------------
+        // Stage 3: decode protected MessagePack scene payload.
+        // -------------------------------------------------------------------
         let sceneData: any = {};
         if (sceneBlob) {
-            console.log(`[LysParser] Decrypting scene.bin (${sceneBlob.length} bytes)...`);
-            // Debug: Check first few bytes before decryption
+            console.log(`[LysParser] Decoding scene.bin payload (${sceneBlob.length} bytes)...`);
+                // Byte previews are intentionally kept to simplify variant debugging.
             if (sceneBlob.length > 0) {
-                console.log(`[LysParser] First 8 bytes (encrypted):`, Array.from(sceneBlob.subarray(0, 8)).map(b => b.toString(16).padStart(2, '0')).join(' '));
+                console.log(`[LysParser] First 8 bytes (encoded payload):`, Array.from(sceneBlob.subarray(0, 8)).map(b => b.toString(16).padStart(2, '0')).join(' '));
             }
 
-            const decrypted = this.decryptBytes(sceneBlob, DEFAULT_APP_ID);
+            const decodedPayload = this.decodeProtectedBytes(sceneBlob, DEFAULT_APP_ID);
 
-            if (decrypted.length > 0) {
-                console.log(`[LysParser] First 8 bytes (decrypted):`, Array.from(decrypted.subarray(0, 8)).map(b => b.toString(16).padStart(2, '0')).join(' '));
+            if (decodedPayload.length > 0) {
+                console.log(`[LysParser] First 8 bytes (decoded payload):`, Array.from(decodedPayload.subarray(0, 8)).map(b => b.toString(16).padStart(2, '0')).join(' '));
             }
 
             try {
-                sceneData = decode(decrypted);
+                sceneData = decode(decodedPayload);
                 console.log('[LysParser] Scene Decoded Successfully');
             } catch (e: any) {
                 console.error("LysParser: Failed to decode scene msgpack", e);
                 console.error("LysParser: Msgpack error details:", e?.message);
 
-                // Inspect end of buffer
-                const len = decrypted.length;
-                const tail = decrypted.subarray(Math.max(0, len - 16), len);
-                console.log(`[LysParser] Last 16 bytes (decrypted):`, Array.from(tail).map(b => b.toString(16).padStart(2, '0')).join(' '));
+                // Tail-byte diagnostics often reveal truncated/shifted payload issues.
+                const len = decodedPayload.length;
+                const tail = decodedPayload.subarray(Math.max(0, len - 16), len);
+                console.log(`[LysParser] Last 16 bytes (decoded payload):`, Array.from(tail).map(b => b.toString(16).padStart(2, '0')).join(' '));
 
                 throw new Error(`Failed to decode scene data: ${e.message}`);
             }
         }
 
-        // 4. Parse Geometry
+        // -------------------------------------------------------------------
+        // Stage 4: parse geometry payloads.
+        // -------------------------------------------------------------------
         // Parse the largest blob as the fallback single geometry (backward compat).
         // Also parse all blobs into a map keyed by filename stem for multi-model support.
         const geometry = this.parseGeometry(geomBlob!.slice().buffer);
@@ -157,6 +191,9 @@ export class LysParser {
         };
     }
 
+    /**
+     * Locates the first top-level JSON object that looks like an LYS manifest.
+     */
     private static findJsonHeader(data: Uint8Array): { start: number, end: number } {
         // Some LYS variants no longer start with '{"version"'.
         // Robustly scan for the first valid top-level JSON object that looks like
@@ -268,18 +305,18 @@ export class LysParser {
         throw new Error('LYS manifest JSON header not found');
     }
 
-    private static decryptBytes(data: Uint8Array, key: string): Uint8Array {
+    /**
+     * Applies the format-specific byte decode transform used by LYS scene payloads.
+     */
+    private static decodeProtectedBytes(data: Uint8Array, key: string): Uint8Array {
         const out = new Uint8Array(data.length);
         const keyBytes = new TextEncoder().encode(key);
         const klen = keyBytes.length;
 
         for (let i = 0; i < data.length; i++) {
-            // Python: (b - ord(key[i % klen])) % 256
-            // JS: (b - key[i%klen]) & 0xFF checks out for modulo 256 wrap
-            // Wait, Python's % operator handles negatives differently. 
-            // If b < key, result is negative. Python -5 % 256 = 251. 
-            // JS -5 % 256 = -5. 
-            // So we need proper modulo: ((n % m) + m) % m
+            // Equivalent to Python: (b - ord(key[i % klen])) % 256
+            // JavaScript's modulo behavior for negatives differs from Python,
+            // so we normalize with ((n % 256) + 256) % 256.
             const k = keyBytes[i % klen];
             const val = (data[i] - k);
             out[i] = ((val % 256) + 256) % 256;
@@ -287,6 +324,9 @@ export class LysParser {
         return out;
     }
 
+    /**
+     * Parses a single LYS geometry blob into a non-indexed, flat-shaded geometry.
+     */
     private static parseGeometry(buffer: ArrayBuffer): THREE.BufferGeometry {
         const view = new DataView(buffer);
 
@@ -297,7 +337,7 @@ export class LysParser {
         // 12-15: Coord Count
         // 16-19: Padding / Reserved
 
-        // Critical: Data starts at Offset 20
+        // Geometry payload begins at byte offset 20.
         const DATA_OFFSET = 20;
 
         if (buffer.byteLength < DATA_OFFSET) {
@@ -325,7 +365,7 @@ export class LysParser {
         geometry.setAttribute('position', new THREE.BufferAttribute(coords, 3));
         geometry.setIndex(new THREE.BufferAttribute(indices, 1));
 
-        // CRITICAL: User expects "STL-like" flat shading (sharp edges).
+        // Preserve STL-like flat shading (sharp edges).
         // Indexed geometry with computeVertexNormals() creates smooth shading,
         // which looks bad on mechanical parts (cylinders, etc).
         // Converting to Non-Indexed splits vertices, ensuring flat face normals.

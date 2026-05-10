@@ -8,6 +8,12 @@ import { computeLowestZ } from '@/utils/geometry';
 import { eulerFromGlobalEuler, quaternionFromGlobalEulerDegrees } from '@/utils/rotation';
 import { generateUuid } from '@/utils/uuid';
 
+/**
+ * File-type import bridge for `.lys` scene files.
+ *
+ * Provides a non-React async import path used by the plugin file-type capability.
+ */
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -36,11 +42,18 @@ export type LysImportPayload = {
 function normalizeLysRotation(
   rotation: { x?: number; y?: number; z?: number } | null | undefined,
 ) {
+  // The converter stage handles X/Y object rotation directly, but Z is applied in a
+  // dedicated post-conversion pass to keep support coordinates coherent.
   const x = Number.isFinite(rotation?.x) ? (rotation!.x as number) : 0;
   const y = Number.isFinite(rotation?.y) ? (rotation!.y as number) : 0;
   return { x, y, z: 0 };
 }
 
+/**
+ * Applies a uniform Z translation to converted support geometry.
+ *
+ * Used when model min-Z alignment introduces an additional vertical offset after conversion.
+ */
 function applySupportZOffset(importData: any, deltaZ: number) {
   if (!importData || !Number.isFinite(deltaZ) || Math.abs(deltaZ) < 1e-6) return;
 
@@ -154,6 +167,13 @@ export type LysImportOptions = {
   importCenterXY?: { x: number; y: number } | null;
 };
 
+/**
+ * Normalizes geometry lookup keys to stem-only lowercase identifiers.
+ *
+ * Examples:
+ * - `o15.bin` -> `o15`
+ * - `models/o15.BIN` -> `o15`
+ */
 function normalizeGeometryLookupKey(raw: string): string {
   const trimmed = raw.trim();
   if (!trimmed) return '';
@@ -163,6 +183,9 @@ function normalizeGeometryLookupKey(raw: string): string {
   return base.endsWith('.bin') ? base.slice(0, -4) : base;
 }
 
+/**
+ * Returns the only geometry entry when exactly one normalized key is present.
+ */
 function getSingleNormalizedGeometry(
   geometriesByName: Map<string, THREE.BufferGeometry>,
 ): { key: string; geometry: THREE.BufferGeometry } | null {
@@ -177,6 +200,14 @@ function getSingleNormalizedGeometry(
   return { key, geometry };
 }
 
+/**
+ * Resolves the most likely geometry blob for a scene object.
+ *
+ * Match priority:
+ * 1) direct object id key
+ * 2) object metadata candidate fields (mesh/model/file/hash-like keys)
+ * 3) single-geometry fallback
+ */
 function resolveObjectGeometryMatch(
   objId: string,
   obj: any,
@@ -285,6 +316,7 @@ function convertSingleObject(
   importCenterX: number,
   importCenterY: number,
 ): LysImportPayload {
+  // Stage 1: prepare filtered object-local scene payload.
   const importedModelId = generateUuid();
 
   console.log('[lys-import][debug] convertSingleObject:start', {
@@ -294,7 +326,7 @@ function convertSingleObject(
     importedModelId,
   });
 
-  // Build a filtered sceneData with only this object and its supports
+  // Build a filtered sceneData with only this object and its supports.
   const filteredSceneData = {
     ...sceneDataForConvert,
     objects: { present: { byId: { [objId]: sceneDataForConvert.objects?.present?.byId?.[objId] ?? rawObj } } },
@@ -322,7 +354,7 @@ function convertSingleObject(
   let dragonfruitData = LysConverter.convert(filteredSceneData, settings, ghostMesh);
   ghostMaterial.dispose();
 
-  // Resolve model Z from geometry bounding box + lychee lift
+  // Stage 2: solve model Z from transformed geometry min-Z + LYS lift.
   let resolvedModelZ: number | null = null;
   {
     objGeometry.computeBoundingBox();
@@ -350,7 +382,7 @@ function convertSingleObject(
 
   LysConverter.reassignModelId(dragonfruitData, importedModelId);
 
-  // Apply Z rotation post-conversion
+  // Stage 3: apply deferred Z rotation + optional world XY placement.
   const rotZDeg = Number.isFinite(rawObj.rotation?.z) ? (rawObj.rotation.z as number) : 0;
   if (Math.abs(rotZDeg) > 1e-6) {
     LysConverter.applyZRotation(dragonfruitData, position.x, position.y, rotZDeg * Math.PI / 180);
@@ -395,6 +427,7 @@ export async function importLysFile(
   file: File,
   options?: LysImportOptions,
 ): Promise<LysImportPayload | LysImportPayload[]> {
+  // Parse options up front so both single-model and multi-model branches share behavior.
   const importCenterX = Number.isFinite(options?.importCenterXY?.x)
     ? Number(options!.importCenterXY!.x)
     : 0;
@@ -436,14 +469,14 @@ export async function importLysFile(
     geometryKeys: [...data.geometriesByName.keys()],
   });
 
-  // Clone scene data and strip Z rotation for the converter (Z applied post-conversion)
+  // Clone scene data and strip Z rotation for the converter (Z is applied post-conversion).
   const sceneDataForConvert = JSON.parse(JSON.stringify(data.sceneData));
   const convertObjects = sceneDataForConvert?.objects?.present?.byId ?? {};
   for (const key of Object.keys(convertObjects)) {
     convertObjects[key].rotation = normalizeLysRotation(convertObjects[key].rotation);
   }
 
-  // Find which objects have a corresponding geometry blob.
+  // Resolve object->geometry mapping, including heuristic fallbacks.
   const objectsWithGeometry: Array<{
     id: string;
     obj: any;
@@ -485,7 +518,7 @@ export async function importLysFile(
   }
 
   // -----------------------------------------------------------------------
-  // Multi-model path: each object gets its own payload
+  // Multi-model path: each object gets an independent payload.
   // -----------------------------------------------------------------------
   if (objectsWithGeometry.length > 1) {
     console.log('[lys-import][debug] entering multi-model import path', {
@@ -525,7 +558,7 @@ export async function importLysFile(
   });
 
   // -----------------------------------------------------------------------
-  // Single-model path (original behavior, using largest geometry if no named match)
+  // Single-model path (legacy behavior compatibility branch).
   // -----------------------------------------------------------------------
   let targetObj: any = null;
   let targetObjId: string | null = null;

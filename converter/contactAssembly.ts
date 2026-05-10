@@ -7,6 +7,16 @@ import { calculateSmoothedNormal } from '@/supports/PlacementLogic/PlacementUtil
 import { calculateDiskThickness } from '@/supports/SupportPrimitives/ContactDisk/contactDiskUtils';
 import { LysSupport } from './types';
 
+/**
+ * Builds a contact-cone + socket-joint pair for a converted support endpoint.
+ *
+ * Responsibilities:
+ * - determine socket location from tip length and orientation constraints
+ * - optionally align tip contact point to model surface via raycast
+ * - compute disk standoff correction for physically plausible contact placement
+ * - return normalized DragonFruit primitives for downstream conversion assembly
+ */
+
 export function createContactAssembly(
   s: LysSupport,
   tipWorld: THREE.Vector3,
@@ -19,6 +29,7 @@ export function createContactAssembly(
   transformedTipNormal?: THREE.Vector3 | null,
   enforceSocketBelowTip: boolean = true
 ): { socketJoint: Joint; contactCone: ContactCone } {
+  // Resolve primary geometric values from imported LYS tip settings.
   const tipLen = tipSettings?.length || tipDefaults.lengthMm;
   const tipBodyDiameter = tipSettings?.diameter || tipDefaults.bodyDiameterMm;
 
@@ -36,6 +47,7 @@ export function createContactAssembly(
       ? new THREE.Vector3(s.tipNormal.x, s.tipNormal.y, s.tipNormal.z)
       : null;
 
+  // Preferred path: use authored LYS tip normal if available/allowed.
   if (preferLysTipNormal && lysTipNormal && lysTipNormal.lengthSq() > 1e-8) {
     const normalized = lysTipNormal.clone().normalize();
     const axisA = normalized.clone();
@@ -65,6 +77,7 @@ export function createContactAssembly(
       }
     }
   } else if (hDistSq <= tipLenSq) {
+    // Geometric fallback: infer a valid socket by solving vertical component from tip length.
     const vOffset = Math.sqrt(tipLenSq - hDistSq);
     socketPosVec = new THREE.Vector3(
       startPos.x,
@@ -80,6 +93,7 @@ export function createContactAssembly(
       socketPosVec = toStart.normalize().multiplyScalar(tipLen).add(tipWorld);
     }
   } else {
+    // Final fallback: place socket along start->tip axis at tip length.
     const toStart = new THREE.Vector3(
       startPos.x - tipWorld.x,
       startPos.y - tipWorld.y,
@@ -102,6 +116,10 @@ export function createContactAssembly(
   let surfaceNormal: Vec3 | undefined = undefined;
   const hasLysTipNormal = !!(lysTipNormal && lysTipNormal.lengthSq() > 1e-8);
 
+  // Surface normal source priority:
+  // 1) authored LYS normal
+  // 2) mesh raycast normal (if enabled)
+  // 3) cone axis
   if (hasLysTipNormal && lysTipNormal) {
     const n = lysTipNormal.clone().normalize();
     surfaceNormal = { x: n.x, y: n.y, z: n.z };
