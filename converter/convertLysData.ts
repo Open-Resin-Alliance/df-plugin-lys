@@ -32,6 +32,7 @@ import {
   pickLeafEndpointDiameter,
   pickStickEndpointTipSettings,
   projectPointToHost,
+  projectPointToHostForBrace,
   resolveSupportOwnerId,
 } from './helpers';
 import { createContactAssembly } from './contactAssembly';
@@ -197,6 +198,82 @@ export function convertLysData(data: LysData, settings: SupportSettings, mesh?: 
           return { parentId: candidateParentId, host };
         }
       }
+      return null;
+    };
+
+    const resolveBraceParentHosts = (
+      s: LysSupport,
+      primaryParentIds: string[],
+    ): { parentAId: string; hostA: HostEntry; parentBId: string; hostB: HostEntry } | null => {
+      const normalizedParentBaseId = typeof s.parentBaseId === 'string' && s.parentBaseId.trim().length > 0
+        ? s.parentBaseId.trim()
+        : null;
+      const normalizedParentTipId = typeof s.parentTipId === 'string' && s.parentTipId.trim().length > 0
+        ? s.parentTipId.trim()
+        : null;
+
+      // If explicit endpoint hints are present and both hosts already exist,
+      // they are authoritative for brace host pairing.
+      if (normalizedParentBaseId && normalizedParentTipId) {
+        const explicitHostA = hostsByLysId.get(normalizedParentBaseId);
+        const explicitHostB = hostsByLysId.get(normalizedParentTipId);
+        if (explicitHostA && explicitHostB) {
+          return {
+            parentAId: normalizedParentBaseId,
+            hostA: explicitHostA,
+            parentBId: normalizedParentTipId,
+            hostB: explicitHostB,
+          };
+        }
+      }
+
+      // Fall back to best available resolved hosts from all candidate parent references,
+      // allowing stale/missing ids in primary parent lists.
+      const candidates = getParentHostCandidates(s, primaryParentIds);
+      const resolved: { parentId: string; host: HostEntry }[] = [];
+      for (const candidateParentId of candidates) {
+        const host = hostsByLysId.get(candidateParentId);
+        if (!host) continue;
+        resolved.push({ parentId: candidateParentId, host });
+        if (resolved.length >= 2) break;
+      }
+
+      if (resolved.length >= 2) {
+        return {
+          parentAId: resolved[0].parentId,
+          hostA: resolved[0].host,
+          parentBId: resolved[1].parentId,
+          hostB: resolved[1].host,
+        };
+      }
+
+      // Same-host fallback when two endpoints explicitly reference the same host.
+      if (normalizedParentBaseId && normalizedParentTipId && normalizedParentBaseId === normalizedParentTipId) {
+        const sameHost = hostsByLysId.get(normalizedParentBaseId);
+        if (sameHost) {
+          return {
+            parentAId: normalizedParentBaseId,
+            hostA: sameHost,
+            parentBId: normalizedParentTipId,
+            hostB: sameHost,
+          };
+        }
+      }
+
+      // Same-host fallback for duplicated parent arrays like ["s10", "s10"].
+      const normalizedPrimaryParents = primaryParentIds
+        .map((pid) => (typeof pid === 'string' ? pid.trim() : ''))
+        .filter((pid) => pid.length > 0);
+      const uniquePrimaryParents = [...new Set(normalizedPrimaryParents)];
+      if (resolved.length === 1 && normalizedPrimaryParents.length >= 2 && uniquePrimaryParents.length === 1) {
+        return {
+          parentAId: resolved[0].parentId,
+          hostA: resolved[0].host,
+          parentBId: resolved[0].parentId,
+          hostB: resolved[0].host,
+        };
+      }
+
       return null;
     };
 
@@ -846,16 +923,21 @@ export function convertLysData(data: LysData, settings: SupportSettings, mesh?: 
       });
     }
 
-    for (const { s, parentIds } of braceCandidates) {
-      if (parentIds.length < 2) continue;
+    for (const { id, s, parentIds } of braceCandidates) {
+      const resolvedBraceHosts = resolveBraceParentHosts(s, parentIds);
+      if (!resolvedBraceHosts) {
+        const candidates = getParentHostCandidates(s, parentIds);
+        const candidateText = candidates.length > 0 ? candidates.join(', ') : '(none)';
+        console.warn(`[LysConverter] Brace candidate ${id} (object ${objectId}) refers to unknown/unprocessed parent(s) ${candidateText}. Skipping.`);
+        continue;
+      }
 
-      const parentAId = parentIds[0];
-      const parentBId = parentIds[1];
-
-      const hostA = hostsByLysId.get(parentAId);
-      const hostB = hostsByLysId.get(parentBId);
-
-      if (!hostA || !hostB) continue;
+      const {
+        parentAId,
+        hostA,
+        parentBId,
+        hostB,
+      } = resolvedBraceHosts;
 
       const pA = transformObjectPoint(s.base);
       const pB = transformObjectPoint(s.tip);
@@ -872,7 +954,7 @@ export function convertLysData(data: LysData, settings: SupportSettings, mesh?: 
       const parentBaseId = typeof s.parentBaseId === 'string' ? s.parentBaseId : null;
       const parentTipId = typeof s.parentTipId === 'string' ? s.parentTipId : null;
 
-      if (parentBaseId && parentTipId) {
+      if (parentBaseId && parentTipId && parentAId !== parentBId) {
         const hintedAttachA = parentBaseId === parentAId
           ? pA
           : parentTipId === parentAId
@@ -886,15 +968,15 @@ export function convertLysData(data: LysData, settings: SupportSettings, mesh?: 
             : null;
 
         const hintedProjA = parentBaseId === parentAId
-          ? projectPointToHost(hostA, pA)
+          ? projectPointToHostForBrace(hostA, pA)
           : parentTipId === parentAId
-            ? projectPointToHost(hostA, pB)
+            ? projectPointToHostForBrace(hostA, pB)
             : null;
 
         const hintedProjB = parentBaseId === parentBId
-          ? projectPointToHost(hostB, pA)
+          ? projectPointToHostForBrace(hostB, pA)
           : parentTipId === parentBId
-            ? projectPointToHost(hostB, pB)
+            ? projectPointToHostForBrace(hostB, pB)
             : null;
 
         if (hintedAttachA && hintedAttachB && hintedProjA && hintedProjB) {

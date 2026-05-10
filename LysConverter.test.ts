@@ -792,6 +792,280 @@ describe('LysConverter', () => {
             'End knot should keep authored brace tip endpoint position');
     });
 
+    it('should resolve brace hosts from explicit parentBaseId/parentTipId when parentId list is stale', () => {
+        const STALE_BRACE_PARENT_DATA = {
+            objects: {
+                present: {
+                    byId: {
+                        o1: {
+                            id: 'o1',
+                            formerCenter: { x: 0, y: 0, z: 0 },
+                            position: { x: 0, y: 0, z: 0 },
+                            rotation: { x: 0, y: 0, z: 0 },
+                            scale: { x: 1, y: 1, z: 1 },
+                        }
+                    }
+                }
+            },
+            supports: {
+                present: {
+                    byId: {
+                        s_root_left: {
+                            id: 's_root_left',
+                            type: 1,
+                            base: { x: 0, y: 0, z: 0 },
+                            tip: { x: 4, y: 0, z: 20 },
+                            parentId: [],
+                            objectIdTip: 'o1',
+                            objectIdBase: 'o1',
+                            settings: { tip: { length: 3 } },
+                        },
+                        s_root_right: {
+                            id: 's_root_right',
+                            type: 1,
+                            base: { x: 20, y: 0, z: 0 },
+                            tip: { x: 16, y: 0, z: 20 },
+                            parentId: [],
+                            objectIdTip: 'o1',
+                            objectIdBase: 'o1',
+                            settings: { tip: { length: 3 } },
+                        },
+                        s_brace_stale: {
+                            id: 's_brace_stale',
+                            type: 0,
+                            base: { x: 2.8, y: 0, z: 16 },
+                            tip: { x: 17.2, y: 0, z: 16 },
+                            parentId: ['s_missing_a', 's_missing_b'],
+                            parentBaseId: 's_root_left',
+                            parentTipId: 's_root_right',
+                            objectIdTip: 'o1',
+                            objectIdBase: 'o1',
+                            settings: { base: { joinDiameter: 0.5 } },
+                        }
+                    }
+                }
+            }
+        };
+
+        const result = LysConverter.convert(STALE_BRACE_PARENT_DATA as any, createDefaultSettings());
+        assert.strictEqual(result.braces.length, 1, 'Brace should import even when parentId list is stale');
+
+        const brace = result.braces[0];
+        const startKnot = result.knots.find(k => k.id === brace.startKnotId);
+        const endKnot = result.knots.find(k => k.id === brace.endKnotId);
+
+        assert.ok(startKnot, 'Expected stale-parent brace start knot to exist');
+        assert.ok(endKnot, 'Expected stale-parent brace end knot to exist');
+
+        const findSegmentById = (segmentId: string) => {
+            for (const trunk of result.trunks) {
+                const seg = trunk.segments.find((segment) => segment.id === segmentId);
+                if (seg) return seg;
+            }
+            for (const branch of result.branches) {
+                const seg = branch.segments.find((segment) => segment.id === segmentId);
+                if (seg) return seg;
+            }
+            return null;
+        };
+
+        const startSeg = findSegmentById(startKnot!.parentShaftId);
+        const endSeg = findSegmentById(endKnot!.parentShaftId);
+        assert.ok(startSeg, 'Stale-parent brace start knot should reference a valid host segment');
+        assert.ok(endSeg, 'Stale-parent brace end knot should reference a valid host segment');
+
+        const startSegTilt = startSeg?.bottomJoint && startSeg?.topJoint
+            ? Math.abs(startSeg.topJoint.pos.x - startSeg.bottomJoint.pos.x)
+            : 0;
+        const endSegTilt = endSeg?.bottomJoint && endSeg?.topJoint
+            ? Math.abs(endSeg.topJoint.pos.x - endSeg.bottomJoint.pos.x)
+            : 0;
+
+        assert.ok(startSegTilt > 0.5 && endSegTilt > 0.5,
+            'Stale-parent brace knots should resolve onto the askew host segments, not the near-vertical root stubs');
+    });
+
+    it('should resolve first two valid brace hosts from misordered parentId arrays', () => {
+        const MISORDERED_BRACE_PARENT_DATA = {
+            objects: {
+                present: {
+                    byId: {
+                        o1: {
+                            id: 'o1',
+                            formerCenter: { x: 0, y: 0, z: 0 },
+                            position: { x: 0, y: 0, z: 0 },
+                            rotation: { x: 0, y: 0, z: 0 },
+                            scale: { x: 1, y: 1, z: 1 },
+                        }
+                    }
+                }
+            },
+            supports: {
+                present: {
+                    byId: {
+                        s_root_left: {
+                            id: 's_root_left',
+                            type: 1,
+                            base: { x: 0, y: 0, z: 0 },
+                            tip: { x: 4, y: 0, z: 20 },
+                            parentId: [],
+                            objectIdTip: 'o1',
+                            objectIdBase: 'o1',
+                            settings: { tip: { length: 3 } },
+                        },
+                        s_root_right: {
+                            id: 's_root_right',
+                            type: 1,
+                            base: { x: 20, y: 0, z: 0 },
+                            tip: { x: 16, y: 0, z: 20 },
+                            parentId: [],
+                            objectIdTip: 'o1',
+                            objectIdBase: 'o1',
+                            settings: { tip: { length: 3 } },
+                        },
+                        s_brace_misordered: {
+                            id: 's_brace_misordered',
+                            type: 0,
+                            base: { x: 2.8, y: 0, z: 16 },
+                            tip: { x: 17.2, y: 0, z: 16 },
+                            parentId: ['s_missing', 's_root_right', 's_root_left'],
+                            parentBaseId: null,
+                            parentTipId: null,
+                            objectIdTip: 'o1',
+                            objectIdBase: 'o1',
+                            settings: { base: { joinDiameter: 0.5 } },
+                        }
+                    }
+                }
+            }
+        };
+
+        const result = LysConverter.convert(MISORDERED_BRACE_PARENT_DATA as any, createDefaultSettings());
+        assert.strictEqual(result.braces.length, 1, 'Brace should import by resolving the first two valid hosts in a misordered parent list');
+
+        const brace = result.braces[0];
+        const startKnot = result.knots.find(k => k.id === brace.startKnotId);
+        const endKnot = result.knots.find(k => k.id === brace.endKnotId);
+
+        assert.ok(startKnot, 'Expected misordered-parent brace start knot to exist');
+        assert.ok(endKnot, 'Expected misordered-parent brace end knot to exist');
+
+        const hostedByKnownSegment = result.trunks.some(t => t.segments.some(seg => seg.id === startKnot!.parentShaftId || seg.id === endKnot!.parentShaftId))
+            || result.branches.some(b => b.segments.some(seg => seg.id === startKnot!.parentShaftId || seg.id === endKnot!.parentShaftId));
+        assert.ok(hostedByKnownSegment, 'Misordered-parent brace knots should resolve to real host segment IDs');
+
+        const sortedByX = [startKnot!, endKnot!].sort((a, b) => a.pos.x - b.pos.x);
+        assert.ok(Math.abs(sortedByX[0].pos.x - 2.8) < 1e-6 && Math.abs(sortedByX[1].pos.x - 17.2) < 1e-6,
+            'Misordered-parent brace should keep authored endpoint mapping after host resolution');
+    });
+
+    it('should bind braces to tip-side host segments when closest projection is a far endpoint clamp', () => {
+        const ENDPOINT_CLAMP_BRACE_DATA = {
+            objects: {
+                present: {
+                    byId: {
+                        o1: {
+                            id: 'o1',
+                            formerCenter: { x: 0, y: 0, z: 0 },
+                            position: { x: 0, y: 0, z: 0 },
+                            rotation: { x: 0, y: 0, z: 0 },
+                            scale: { x: 1, y: 1, z: 1 },
+                        }
+                    }
+                }
+            },
+            supports: {
+                present: {
+                    byId: {
+                        s_root_left: {
+                            id: 's_root_left',
+                            type: 1,
+                            base: { x: 0, y: 0, z: 0 },
+                            tip: { x: 10, y: 0, z: 20 },
+                            parentId: [],
+                            objectIdTip: 'o1',
+                            objectIdBase: 'o1',
+                            settings: {
+                                base: { joinDiameter: 1.0, joinLength: 12 },
+                                tip: { diameter: 0.8, length: 2.0 },
+                            },
+                        },
+                        s_root_right: {
+                            id: 's_root_right',
+                            type: 1,
+                            base: { x: 20, y: 0, z: 0 },
+                            tip: { x: 10, y: 0, z: 20 },
+                            parentId: [],
+                            objectIdTip: 'o1',
+                            objectIdBase: 'o1',
+                            settings: {
+                                base: { joinDiameter: 1.0, joinLength: 12 },
+                                tip: { diameter: 0.8, length: 2.0 },
+                            },
+                        },
+                        s_brace_endpoint_clamp: {
+                            id: 's_brace_endpoint_clamp',
+                            type: 0,
+                            // Endpoints sit high on each host, but near each root X to trigger
+                            // lower-segment endpoint-clamp ambiguity in raw closest-segment projection.
+                            base: { x: 0.35, y: 0, z: 14.2 },
+                            tip: { x: 19.65, y: 0, z: 14.2 },
+                            parentId: ['s_root_left', 's_root_right'],
+                            parentBaseId: 's_root_left',
+                            parentTipId: 's_root_right',
+                            objectIdTip: 'o1',
+                            objectIdBase: 'o1',
+                            settings: { base: { joinDiameter: 0.5 } },
+                        },
+                    }
+                }
+            }
+        };
+
+        const result = LysConverter.convert(ENDPOINT_CLAMP_BRACE_DATA as any, createDefaultSettings());
+        assert.strictEqual(result.braces.length, 1, 'Expected one brace in endpoint-clamp fixture');
+        assert.strictEqual(result.trunks.length, 2, 'Expected two host trunks in endpoint-clamp fixture');
+
+        const brace = result.braces[0];
+        const startKnot = result.knots.find(k => k.id === brace.startKnotId);
+        const endKnot = result.knots.find(k => k.id === brace.endKnotId);
+        assert.ok(startKnot && endKnot, 'Endpoint-clamp fixture should produce both brace host knots');
+
+        const trunksByRootX = result.trunks
+            .map((trunk) => ({ trunk, root: result.roots.find((root) => root.id === trunk.rootId)! }))
+            .sort((a, b) => a.root.transform.pos.x - b.root.transform.pos.x);
+
+        assert.strictEqual(trunksByRootX.length, 2, 'Expected to map two roots to two trunks');
+
+        const leftTrunk = trunksByRootX[0].trunk;
+        const rightTrunk = trunksByRootX[1].trunk;
+
+        assert.ok(leftTrunk.segments.length >= 2 && rightTrunk.segments.length >= 2,
+            'Fixture expects host trunks to have lower and tip-side segments');
+
+        const knotsByX = [startKnot!, endKnot!].sort((a, b) => a.pos.x - b.pos.x);
+        const leftKnot = knotsByX[0];
+        const rightKnot = knotsByX[1];
+
+        const leftLowerJointZ = leftTrunk.segments[0].topJoint?.pos.z ?? -Infinity;
+        const rightLowerJointZ = rightTrunk.segments[0].topJoint?.pos.z ?? -Infinity;
+
+        assert.strictEqual(leftKnot.parentShaftId, leftTrunk.segments[1].id,
+            'Left brace knot should bind to the tip-side host segment rather than lower endpoint-clamped segment');
+        assert.strictEqual(rightKnot.parentShaftId, rightTrunk.segments[1].id,
+            'Right brace knot should bind to the tip-side host segment rather than lower endpoint-clamped segment');
+
+        assert.ok((leftKnot.t ?? 0) > 0.05 && (leftKnot.t ?? 0) < 0.95,
+            'Left brace knot should not import as an endpoint-clamped t on the upper host segment');
+        assert.ok((rightKnot.t ?? 0) > 0.05 && (rightKnot.t ?? 0) < 0.95,
+            'Right brace knot should not import as an endpoint-clamped t on the upper host segment');
+
+        assert.ok(leftKnot.pos.z > leftLowerJointZ - 1e-6,
+            'Left brace knot authored position should remain above the lower host joint in endpoint-clamp fixture');
+        assert.ok(rightKnot.pos.z > rightLowerJointZ - 1e-6,
+            'Right brace knot authored position should remain above the lower host joint in endpoint-clamp fixture');
+    });
+
     it('should correctly convert Leaves (Type 1 Child with negligible shaft)', () => {
         // Create a Mock Leaf: Short distance between base and tip
         // We need a deep copy of MOCK_LYS_DATA to fix the const assignment issue

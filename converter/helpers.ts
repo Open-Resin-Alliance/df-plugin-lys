@@ -483,6 +483,253 @@ export function projectPointToHost(host: HostEntry, point: THREE.Vector3): { t: 
   };
 }
 
+function getHostBaseAndTipPoints(host: HostEntry): { base: THREE.Vector3; tip: THREE.Vector3 } {
+  if (host.kind === 'trunk') {
+    const rootTop = new THREE.Vector3(
+      host.root.transform.pos.x,
+      host.root.transform.pos.y,
+      host.root.transform.pos.z + host.root.diskHeight + host.root.coneHeight,
+    );
+
+    const tipPos = host.trunk.segments[host.trunk.segments.length - 1]?.topJoint?.pos
+      ?? (host.trunk.contactCone ? getFinalSocketPosition(host.trunk.contactCone) : rootTop);
+
+    return {
+      base: rootTop,
+      tip: new THREE.Vector3(tipPos.x, tipPos.y, tipPos.z),
+    };
+  }
+
+  if (host.kind === 'branch') {
+    const base = new THREE.Vector3(host.parentKnot.pos.x, host.parentKnot.pos.y, host.parentKnot.pos.z);
+    const tipPos = host.branch.segments[host.branch.segments.length - 1]?.topJoint?.pos
+      ?? (host.branch.contactCone ? getFinalSocketPosition(host.branch.contactCone) : host.parentKnot.pos);
+
+    return {
+      base,
+      tip: new THREE.Vector3(tipPos.x, tipPos.y, tipPos.z),
+    };
+  }
+
+  const rootTop = new THREE.Vector3(
+    host.root.transform.pos.x,
+    host.root.transform.pos.y,
+    host.root.transform.pos.z + host.root.diskHeight + host.root.coneHeight,
+  );
+  const tip = new THREE.Vector3(host.hostKnot.pos.x, host.hostKnot.pos.y, host.hostKnot.pos.z);
+  return { base: rootTop, tip };
+}
+
+type HostSegmentProjectionCandidate = {
+  parentShaftId: string;
+  pointOnLine: Vec3;
+  t: number;
+  distance: number;
+  isEndpoint: boolean;
+  segmentIndex: number;
+  segmentCount: number;
+};
+
+function collectHostSegmentProjectionCandidates(
+  host: HostEntry,
+  point: THREE.Vector3,
+): HostSegmentProjectionCandidate[] {
+  const candidates: HostSegmentProjectionCandidate[] = [];
+
+  if (host.kind === 'trunk') {
+    const segments = host.trunk.segments;
+    if (segments.length === 0) return candidates;
+
+    const rootTop: Vec3 = {
+      x: host.root.transform.pos.x,
+      y: host.root.transform.pos.y,
+      z: host.root.transform.pos.z + host.root.diskHeight + host.root.coneHeight,
+    };
+
+    let currentStart: Vec3 = rootTop;
+    for (let i = 0; i < segments.length; i++) {
+      const seg = segments[i];
+      const endPos = seg.topJoint?.pos
+        ?? (host.trunk.contactCone ? getFinalSocketPosition(host.trunk.contactCone) : currentStart);
+      const end: Vec3 = { x: endPos.x, y: endPos.y, z: endPos.z };
+
+      const projected = projectPointToSegment(seg, currentStart, end, point);
+      const projectedPoint = new THREE.Vector3(projected.pointOnLine.x, projected.pointOnLine.y, projected.pointOnLine.z);
+      const distance = point.distanceTo(projectedPoint);
+      const isEndpoint = projected.t <= 0.02 || projected.t >= 0.98;
+
+      candidates.push({
+        parentShaftId: seg.id,
+        pointOnLine: projected.pointOnLine,
+        t: projected.t,
+        distance,
+        isEndpoint,
+        segmentIndex: i,
+        segmentCount: segments.length,
+      });
+
+      currentStart = end;
+    }
+
+    return candidates;
+  }
+
+  if (host.kind === 'branch') {
+    const segments = host.branch.segments;
+    if (segments.length === 0) return candidates;
+
+    let currentStart: Vec3 = { x: host.parentKnot.pos.x, y: host.parentKnot.pos.y, z: host.parentKnot.pos.z };
+    for (let i = 0; i < segments.length; i++) {
+      const seg = segments[i];
+      const endPos = seg.topJoint?.pos
+        ?? (host.branch.contactCone ? getFinalSocketPosition(host.branch.contactCone) : currentStart);
+      const end: Vec3 = { x: endPos.x, y: endPos.y, z: endPos.z };
+
+      const projected = projectPointToSegment(seg, currentStart, end, point);
+      const projectedPoint = new THREE.Vector3(projected.pointOnLine.x, projected.pointOnLine.y, projected.pointOnLine.z);
+      const distance = point.distanceTo(projectedPoint);
+      const isEndpoint = projected.t <= 0.02 || projected.t >= 0.98;
+
+      candidates.push({
+        parentShaftId: seg.id,
+        pointOnLine: projected.pointOnLine,
+        t: projected.t,
+        distance,
+        isEndpoint,
+        segmentIndex: i,
+        segmentCount: segments.length,
+      });
+
+      currentStart = end;
+    }
+
+    return candidates;
+  }
+
+  const segments = host.kickstand.segments;
+  if (segments.length === 0) return candidates;
+
+  const rootTop: Vec3 = {
+    x: host.root.transform.pos.x,
+    y: host.root.transform.pos.y,
+    z: host.root.transform.pos.z + host.root.diskHeight + host.root.coneHeight,
+  };
+
+  let currentStart: Vec3 = rootTop;
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i];
+    const endPos = seg.topJoint?.pos ?? host.hostKnot.pos;
+    const end: Vec3 = { x: endPos.x, y: endPos.y, z: endPos.z };
+
+    const projected = projectPointToSegment(seg, currentStart, end, point);
+    const projectedPoint = new THREE.Vector3(projected.pointOnLine.x, projected.pointOnLine.y, projected.pointOnLine.z);
+    const distance = point.distanceTo(projectedPoint);
+    const isEndpoint = projected.t <= 0.02 || projected.t >= 0.98;
+
+    candidates.push({
+      parentShaftId: seg.id,
+      pointOnLine: projected.pointOnLine,
+      t: projected.t,
+      distance,
+      isEndpoint,
+      segmentIndex: i,
+      segmentCount: segments.length,
+    });
+
+    currentStart = end;
+  }
+
+  return candidates;
+}
+
+function pickBestBraceHostCandidate(
+  host: HostEntry,
+  point: THREE.Vector3,
+): { t: number; pointOnLine: Vec3; parentShaftId: string } | null {
+  const candidates = collectHostSegmentProjectionCandidates(host, point);
+  if (candidates.length === 0) return null;
+
+  const { base, tip } = getHostBaseAndTipPoints(host);
+  const axis = tip.clone().sub(base);
+  const axisLenSq = axis.lengthSq();
+  const axisAlpha = axisLenSq > 1e-8
+    ? THREE.MathUtils.clamp(point.clone().sub(base).dot(axis) / axisLenSq, 0, 1)
+    : 0;
+
+  const desiredIndex = axisAlpha * (candidates[0].segmentCount - 1);
+
+  let best: HostSegmentProjectionCandidate | null = null;
+  let bestScore = Number.POSITIVE_INFINITY;
+
+  for (const candidate of candidates) {
+    const endpointPenalty = candidate.isEndpoint
+      ? Math.max(0, candidate.distance - 0.35) * 4.0 + 0.75
+      : 0;
+    const indexPenalty = Math.abs(candidate.segmentIndex - desiredIndex) * 0.25;
+    const score = candidate.distance + endpointPenalty + indexPenalty;
+
+    if (score < bestScore) {
+      bestScore = score;
+      best = candidate;
+    }
+  }
+
+  if (!best) return null;
+  return {
+    t: best.t,
+    pointOnLine: best.pointOnLine,
+    parentShaftId: best.parentShaftId,
+  };
+}
+
+function projectBracePointToHost(
+  host: HostEntry,
+  point: THREE.Vector3,
+): { t: number; pointOnLine: Vec3; parentShaftId: string } | null {
+  const initial = projectPointToHost(host, point);
+  if (!initial) return null;
+  const bestCandidate = pickBestBraceHostCandidate(host, point);
+  if (bestCandidate) {
+    return bestCandidate;
+  }
+
+  const initialPoint = new THREE.Vector3(initial.pointOnLine.x, initial.pointOnLine.y, initial.pointOnLine.z);
+  const initialDistance = point.distanceTo(initialPoint);
+  const initialIsEndpoint = initial.t <= 0.02 || initial.t >= 0.98;
+
+  // Large endpoint-clamped projections are often segment-misbindings for imported braces.
+  // Bias toward the host side nearest to the authored point in that case.
+  if (!(initialIsEndpoint && initialDistance > 0.75)) {
+    return initial;
+  }
+
+  const { base, tip } = getHostBaseAndTipPoints(host);
+  const preferredSide: 'base' | 'tip' = point.distanceToSquared(base) <= point.distanceToSquared(tip) ? 'base' : 'tip';
+  const preferred = projectPointToHostPreferredSide(host, point, preferredSide);
+  if (!preferred) return initial;
+
+  const preferredPoint = new THREE.Vector3(preferred.pointOnLine.x, preferred.pointOnLine.y, preferred.pointOnLine.z);
+  const preferredDistance = point.distanceTo(preferredPoint);
+  const preferredIsEndpoint = preferred.t <= 0.02 || preferred.t >= 0.98;
+
+  if (!preferredIsEndpoint && preferredDistance <= initialDistance + 0.5) {
+    return preferred;
+  }
+
+  if (preferredDistance + 0.15 < initialDistance) {
+    return preferred;
+  }
+
+  return initial;
+}
+
+export function projectPointToHostForBrace(
+  host: HostEntry,
+  point: THREE.Vector3,
+): { t: number; pointOnLine: Vec3; parentShaftId: string } | null {
+  return projectBracePointToHost(host, point);
+}
+
 function projectPointToSegment(
   segment: Segment,
   start: Vec3,
@@ -704,11 +951,11 @@ export function pickBracePairing(
   attachPointA: THREE.Vector3;
   attachPointB: THREE.Vector3;
 } | null {
-  const directA = projectPointToHost(hostA, pA);
-  const directB = projectPointToHost(hostB, pB);
+  const directA = projectBracePointToHost(hostA, pA);
+  const directB = projectBracePointToHost(hostB, pB);
 
-  const swappedA = projectPointToHost(hostA, pB);
-  const swappedB = projectPointToHost(hostB, pA);
+  const swappedA = projectBracePointToHost(hostA, pB);
+  const swappedB = projectBracePointToHost(hostB, pA);
 
   const directError = (directA && directB)
     ? pA.distanceTo(new THREE.Vector3(directA.pointOnLine.x, directA.pointOnLine.y, directA.pointOnLine.z))
