@@ -38,6 +38,7 @@ const PLUGIN_DEFINITION: ComplexPluginDefinition = {
       },
     },
   ],
+  sceneOverlayLoader: () => import('./GhostOverlay').then((module) => ({ default: module.GhostOverlay })),
 };
 
 export default PLUGIN_DEFINITION;
