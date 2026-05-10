@@ -10,8 +10,10 @@ import { useState, useCallback, useRef } from 'react';
 import * as THREE from 'three';
 import { LysConverter } from './LysConverter';
 import { loadFromImportFormat } from '@/supports/state';
+import { updateRaftSettings } from '@/supports/Rafts/Crenelated/RaftState';
 import { loadStlGeometry, type GeometryWithBounds } from '@/hooks/useStlGeometry';
 import { getSettings } from '@/supports/Settings';
+import { getImportDefaultsRaftPatch, getSavedImportDefaultsSettings } from '@/features/scene/importDefaultsPreferences';
 import { generateUuid } from '@/utils/uuid';
 
 function generateImportId(): string {
@@ -225,6 +227,7 @@ export function useLysSceneImport() {
       const converted = LysConverter.convert(pending.json, currentSettings, mesh);
       LysConverter.reassignModelId(converted, importedModelId);
 
+      updateRaftSettings(getImportDefaultsRaftPatch(getSavedImportDefaultsSettings()));
       loadFromImportFormat(converted);
 
       const result: LysSceneImportResult = {
