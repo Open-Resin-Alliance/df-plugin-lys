@@ -78,8 +78,6 @@ export class LysParser {
         const filesInfo = manifest.mangoFiles || {};
 
         let sceneBlob: Uint8Array | null = null;
-        let geomBlob: Uint8Array | null = null;
-        let largestBinSize = 0;
         // All non-scene .bin blobs keyed by their filename stem (e.g. "o15" from "o15.bin")
         const allGeomBlobs = new Map<string, Uint8Array>();
 
@@ -109,19 +107,13 @@ export class LysParser {
                 // Stem = filename without .bin extension (case-preserved from original fname)
                 const stem = fname.slice(0, fname.length - 4);
                 allGeomBlobs.set(stem, blob);
-                allGeomBlobs.set(stem.toLowerCase(), blob); // also register lowercase for easy lookup
-
-                if (size > largestBinSize) {
-                    largestBinSize = size;
-                    geomBlob = blob;
-                }
             }
         }
 
         if (!sceneBlob) {
             console.warn("LysParser: scene.bin not found in manifest");
         }
-        if (!geomBlob) {
+        if (allGeomBlobs.size === 0) {
             throw new Error("LysParser: No geometry .bin file found");
         }
 
@@ -161,19 +153,40 @@ export class LysParser {
         // -------------------------------------------------------------------
         // Stage 4: parse geometry payloads.
         // -------------------------------------------------------------------
-        // Parse the largest blob as the fallback single geometry (backward compat).
-        // Also parse all blobs into a map keyed by filename stem for multi-model support.
-        const geometry = this.parseGeometry(geomBlob!.slice().buffer);
-
-        const geometriesByName = new Map<string, THREE.BufferGeometry>();
+        // Parse all unique stem candidates, sorted by payload size (largest first).
+        // The first successfully parsed payload is used as fallback `geometry`.
+        const uniqueCandidates = new Map<string, { stem: string; blob: Uint8Array }>();
         for (const [stem, blob] of allGeomBlobs) {
-            // Avoid parsing the same blob twice if both lower/original cases were stored
-            if (geometriesByName.has(stem)) continue;
-            try {
-                geometriesByName.set(stem, this.parseGeometry(blob.slice().buffer));
-            } catch (err) {
-                console.warn(`[LysParser] Failed to parse geometry for "${stem}":`, err);
+            const normalizedStem = stem.toLowerCase();
+            const existing = uniqueCandidates.get(normalizedStem);
+            if (!existing || blob.byteLength > existing.blob.byteLength) {
+                uniqueCandidates.set(normalizedStem, { stem, blob });
             }
+        }
+
+        const sortedCandidates = [...uniqueCandidates.entries()]
+            .sort(([, a], [, b]) => b.blob.byteLength - a.blob.byteLength);
+
+        let geometry: THREE.BufferGeometry | null = null;
+        const geometriesByName = new Map<string, THREE.BufferGeometry>();
+
+        for (const [normalizedStem, candidate] of sortedCandidates) {
+            try {
+                const parsed = this.parseGeometry(candidate.blob.slice().buffer);
+                if (!geometry) {
+                    geometry = parsed;
+                }
+
+                geometriesByName.set(candidate.stem, parsed);
+                geometriesByName.set(normalizedStem, parsed);
+            } catch (err) {
+                const reason = err instanceof Error ? err.message : String(err);
+                console.info(`[LysParser] Skipping non-geometry payload "${candidate.stem}": ${reason}`);
+            }
+        }
+
+        if (!geometry) {
+            throw new Error('LysParser: No parseable geometry .bin payloads found');
         }
 
         const sceneObjectIds = Object.keys(sceneData?.objects?.present?.byId ?? {});
@@ -328,6 +341,7 @@ export class LysParser {
      * Parses a single LYS geometry blob into a non-indexed, flat-shaded geometry.
      */
     private static parseGeometry(buffer: ArrayBuffer): THREE.BufferGeometry {
+        const MIN_HEADER_BYTES = 20;
         const view = new DataView(buffer);
 
         // Header is 20 bytes
@@ -337,26 +351,48 @@ export class LysParser {
         // 12-15: Coord Count
         // 16-19: Padding / Reserved
 
-        // Geometry payload begins at byte offset 20.
-        const DATA_OFFSET = 20;
-
-        if (buffer.byteLength < DATA_OFFSET) {
+        if (buffer.byteLength < MIN_HEADER_BYTES) {
             throw new Error("Geometry file too short");
         }
+
+        const declaredHeaderLength = view.getUint32(4, true);
+        const dataOffset = Number.isFinite(declaredHeaderLength)
+            && declaredHeaderLength >= MIN_HEADER_BYTES
+            && declaredHeaderLength <= buffer.byteLength
+            ? declaredHeaderLength
+            : MIN_HEADER_BYTES;
 
         const nIndices = view.getUint32(8, true); // Little Endian
         const nCoords = view.getUint32(12, true);
 
+        if (!Number.isFinite(nIndices) || !Number.isFinite(nCoords) || nIndices === 0 || nCoords === 0) {
+            throw new Error(`Geometry payload has invalid counts (indices=${nIndices}, coords=${nCoords})`);
+        }
+        if (nCoords % 3 !== 0) {
+            throw new Error(`Geometry payload has non-vec3 coordinate count (${nCoords})`);
+        }
+
         // Indices
         const indicesByteLen = nIndices * 4;
-        const indicesStart = DATA_OFFSET;
+        const coordsByteLen = nCoords * 4;
+        const requiredPayloadBytes = indicesByteLen + coordsByteLen;
+
+        if (requiredPayloadBytes > (buffer.byteLength - dataOffset)) {
+            throw new Error(
+                `Geometry payload byte length mismatch (header=${dataOffset}, indicesBytes=${indicesByteLen}, coordsBytes=${coordsByteLen}, total=${buffer.byteLength})`
+            );
+        }
+
+        const indicesStart = dataOffset;
+        const indicesEnd = indicesStart + indicesByteLen;
+        const coordsStart = indicesEnd;
+        const coordsEnd = coordsStart + coordsByteLen;
+
         // Slice to create typed array
-        const indices = new Uint32Array(buffer.slice(indicesStart, indicesStart + indicesByteLen));
+        const indices = new Uint32Array(buffer.slice(indicesStart, indicesEnd));
 
         // Coords
-        const coordsStart = indicesStart + indicesByteLen;
-        const coordsByteLen = nCoords * 4;
-        const coords = new Float32Array(buffer.slice(coordsStart, coordsStart + coordsByteLen));
+        const coords = new Float32Array(buffer.slice(coordsStart, coordsEnd));
 
         // Construct Geometry
         const geometry = new THREE.BufferGeometry();
