@@ -160,17 +160,38 @@ export function isTwigCandidate(
     return false;
   }
 
+  const endpointDistance = getSupportEndpointDistanceMm(s);
+  if (!Number.isFinite(endpointDistance as number)) {
+    return false;
+  }
+
+  // A LYS "mini" support is the equivalent of a DragonFruit twig: a mesh-to-mesh
+  // support that contacts a model object at both ends. Two native-placement
+  // heuristics must NOT gate an imported mini:
+  //
+  //  1. The plate-grounding check below (base near z=0). It reads the RAW, object-
+  //     LOCAL base.z, but the builder (transformObjectPoint) applies the object's
+  //     rotation/position before placing the contact. On a rotated object the local
+  //     base.z is meaningless as a world height: a mini whose local base.z happens to
+  //     land within 0.2 of zero (e.g. 0.135) is rejected even though its true world
+  //     base sits well above the plate. Rejected here it falls through to root/trunk
+  //     and imports as the wrong support type.
+  //  2. The 5mm twig/stick length cutoff, which only exists to convert long native
+  //     mesh-to-mesh placements into sticks. An imported mini is a twig at any length.
+  //
+  // A mini is mesh-to-mesh by definition, so accept it once endpoint geometry is
+  // valid. The builder (Phase 4A) places both contacts from the transformed world
+  // points, identical to a mini that passes the non-mini path.
+  if (isMiniSupport(s)) {
+    return true;
+  }
+
   const baseZ = s.base?.z;
   if (!Number.isFinite(baseZ) || Math.abs(baseZ) <= 0.2) {
     return false;
   }
 
   if (!Number.isFinite(stickVsTwigCutoffMm) || stickVsTwigCutoffMm <= 0) {
-    return false;
-  }
-
-  const endpointDistance = getSupportEndpointDistanceMm(s);
-  if (!Number.isFinite(endpointDistance as number)) {
     return false;
   }
 
