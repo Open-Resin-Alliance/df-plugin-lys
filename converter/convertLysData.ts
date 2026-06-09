@@ -38,6 +38,11 @@ import {
 import { createContactAssembly } from './contactAssembly';
 import { HostEntry, LysData, LysSupport } from './types';
 import { quaternionFromGlobalEulerDegrees } from '@/utils/rotation';
+import { calculateSmoothedNormal } from '@/supports/PlacementLogic/PlacementUtils';
+import { twigDiskJointStandoff } from '@/supports/SupportTypes/Twig/twigJointStandoff';
+import { twigJointDiameterForLocalDiameter, resolveTwigDiameterAtSegmentT } from '@/supports/SupportTypes/Twig/twigTaper';
+import { recomputeLeafContactConeAxisAndLength } from '@/supports/state';
+import type { ContactDiskProfile } from '@/supports/SupportPrimitives/ContactCone/types';
 
 /**
  * Core LYS -> DragonFruit conversion routine.
@@ -49,6 +54,74 @@ import { quaternionFromGlobalEulerDegrees } from '@/utils/rotation';
  * 4) create converted entities while preserving host relationships
  * 5) apply per-object world XY placement to converted slices
  */
+
+/**
+ * Resolve the TRUE model-surface normal at an anatomy-less contact by raycasting
+ * the model mesh, falling back to the authored LYS normal on a miss.
+ *
+ * WHY: Lychee contacts the model with a sphere on a shaft; its authored normal is
+ * the sphere's *approach direction*, not the surface normal. At steep angles these
+ * diverge badly (measured up to ~111° on real twig contacts — see
+ * .scratch/lys-twig-contact-disk-plan.md §7.5). DragonFruit's contact disk must seat
+ * perpendicular to the real face, so we recover the true normal from the mesh.
+ *
+ * The shaft (coneAxis) keeps Lychee's authored angle; the disk's socket joint absorbs
+ * the difference (same contract as the native twigBuilder).
+ *
+ * FRAME NOTE (critical): the importer's contact points (transformObjectPoint) do NOT
+ * share a frame with the raycast ghost mesh — the ghost mesh offsets its geometry by
+ * -pivot, but transformObjectPoint omits pivot. So a world contact point floats ~pivot
+ * (~18mm here) off the mesh. We compensate by subtracting `meshPivotShift` (= R·S·pivot)
+ * to land the point ON the ghost mesh before casting. calculateSmoothedNormal returns
+ * the normal in world frame (it applies mesh.matrixWorld), so no further mapping is
+ * needed. Validated end-to-end by .scratch/lys-twig-probe/probe5-optionB2.mjs.
+ *
+ * Cast policy (validated by probe):
+ *  - Travel along -authoredNormal (originate outside the surface along +N, travel in).
+ *  - Among intersections, pick the one NEAREST the (compensated) contact point.
+ *  - Use calculateSmoothedNormal at the hit (matches every other support's raycast path).
+ *
+ * Returns a unit Vec3. Falls back to `authoredNormal` (already world-frame, unit) if the
+ * mesh is absent, the authored normal is unusable, or the ray misses.
+ */
+function raycastSurfaceNormal(
+  contactWorld: THREE.Vector3,
+  authoredNormal: THREE.Vector3,
+  meshPivotShift: THREE.Vector3,
+  mesh?: THREE.Mesh
+): { normal: Vec3; raycastHit: boolean } {
+  const fallback = { normal: { x: authoredNormal.x, y: authoredNormal.y, z: authoredNormal.z }, raycastHit: false };
+  if (!mesh || authoredNormal.lengthSq() <= 1e-8) return fallback;
+
+  // Compensate the world contact point into the ghost-mesh frame (see FRAME NOTE).
+  const meshFrameContact = contactWorld.clone().sub(meshPivotShift);
+
+  const dir = authoredNormal.clone().normalize().multiplyScalar(-1); // travel INTO the surface
+  // Originate well outside the mesh so the ray enters from outside the solid.
+  mesh.geometry.computeBoundingSphere();
+  const boundingRadius = mesh.geometry.boundingSphere?.radius ?? 0;
+  const standoff = boundingRadius * 2 + 50;
+  const origin = meshFrameContact.clone().addScaledVector(dir, -standoff);
+
+  const raycaster = new THREE.Raycaster();
+  raycaster.set(origin, dir);
+  const intersects = raycaster.intersectObject(mesh, false);
+  if (intersects.length === 0) return fallback;
+
+  // Pick the intersection nearest the (compensated) contact point.
+  let best = intersects[0];
+  let bestDist = best.point.distanceTo(meshFrameContact);
+  for (const hit of intersects) {
+    const dist = hit.point.distanceTo(meshFrameContact);
+    if (dist < bestDist) { best = hit; bestDist = dist; }
+  }
+
+  const smoothed = calculateSmoothedNormal(best);
+  const n = new THREE.Vector3(smoothed.x, smoothed.y, smoothed.z);
+  if (n.lengthSq() <= 1e-8) return fallback;
+  n.normalize();
+  return { normal: { x: n.x, y: n.y, z: n.z }, raycastHit: true };
+}
 
 export function convertLysData(data: LysData, settings: SupportSettings, mesh?: THREE.Mesh): DragonfruitImportFormat {
   const result: DragonfruitImportFormat & { kickstands: KickstandBuildResult[] } = {
@@ -155,6 +228,16 @@ export function convertLysData(data: LysData, settings: SupportSettings, mesh?: 
 
       return n;
     };
+
+    // World-space offset between an importer contact point (transformObjectPoint, which
+    // omits the model pivot) and the same point on the raycast ghost mesh (whose inner
+    // mesh is offset by -pivot). The ghost mesh applies `mesh.position = -pivot` BEFORE
+    // the group's scale+rotation, so the world delta is R·S·pivot. Subtracting this from
+    // a world contact point lands it ON the ghost mesh, so anatomy-less contacts can
+    // raycast the true surface normal. See raycastSurfaceNormal + plan §7.5 frame finding.
+    const meshPivotShift = new THREE.Vector3(pivot.x, pivot.y, pivot.z)
+      .multiply(objectScale)
+      .applyQuaternion(objectQuaternion);
 
     const transformRootBasePoint = (v: { x: number; y: number; z: number }): THREE.Vector3 => {
       // LYS root/base positions are authored in post-scale, post-rotation world XY space
@@ -352,9 +435,11 @@ export function convertLysData(data: LysData, settings: SupportSettings, mesh?: 
       const supportHasChildren = hasChildren(id);
 
       if (parentIds.length === 0) {
-        if (supportHasChildren) {
-          rootCandidates.push({ id, s });
-        } else if (isTwigCandidate(s, parentIds, stickVsTwigCutoffMm)) {
+        // Twig/stick shape checks must beat the has-children promotion: LYS can
+        // author a twig that hosts leaves/braces (PR #156). If we promoted those
+        // to trunks, the model-to-model contact pair gets lost and the children
+        // attach to a fake root instead of the real twig.
+        if (isTwigCandidate(s, parentIds, stickVsTwigCutoffMm)) {
           twigCandidates.push({ id, s });
         } else if (isStickCandidate(s, parentIds, stickVsTwigCutoffMm)) {
           stickCandidates.push({ id, s });
@@ -410,7 +495,7 @@ export function convertLysData(data: LysData, settings: SupportSettings, mesh?: 
     // -----------------------------------------------------------------------
     // Phase 4A: convert floating two-contact twigs.
     // -----------------------------------------------------------------------
-    for (const { s } of twigCandidates) {
+    for (const { id, s } of twigCandidates) {
       if (!s.base || !s.tip) continue;
 
       const baseWorld = transformObjectPoint(s.base);
@@ -432,15 +517,77 @@ export function convertLysData(data: LysData, settings: SupportSettings, mesh?: 
       axisA.normalize();
       const axisB = axisA.clone().multiplyScalar(-1);
 
+      // Seat each contact disk against the TRUE model-surface normal (raycast),
+      // not Lychee's authored sphere-approach normal. The shaft (coneAxis) keeps
+      // Lychee's angle; the disk pivots to the real face. See raycastSurfaceNormal.
+      const baseSurface = raycastSurfaceNormal(baseWorld, transformedBaseNormal, meshPivotShift, mesh);
+      const tipSurface = raycastSurfaceNormal(tipWorld, transformedTipNormal, meshPivotShift, mesh);
+
       const baseEndpointSettings = pickStickEndpointTipSettings(s, 'base');
       const tipEndpointSettings = pickStickEndpointTipSettings(s, 'tip');
       const contactDiameterA = pickTwigContactDiameter(baseEndpointSettings);
       const contactDiameterB = pickTwigContactDiameter(tipEndpointSettings);
 
+      // Shared disk profile (matches native buildTwig: src/.../Twig/twigBuilder.ts).
+      const diskProfile: ContactDiskProfile = {
+        type: 'disk',
+        diskThicknessMm: tipDefaults.diskThicknessMm ?? 0.1,
+        maxStandoffMm: tipDefaults.maxStandoffMm ?? 1.5,
+        standoffAngleThreshold: tipDefaults.standoffAngleThreshold ?? Math.PI / 4,
+      };
+
+      // Disk-end joints, built with the SAME native standoff/taper anatomy the editor
+      // uses, so the imported twig is structurally identical to a natively-authored one.
+      // WHY THIS MATTERS: the runtime knot-drag path (useKnotInteraction) and the twig
+      // taper math (twigTaper) resolve a host twig via segment.bottomJoint/topJoint. A
+      // segment without joints renders fine statically but has NO host endpoints — so a
+      // leaf knot on it snaps to the build plate when dragged and its diameter lookup
+      // degenerates to the 1.2mm default (oversized knot). The joints sit offset ALONG
+      // each disk's surface normal by the angle-aware standoff (twigDiskJointStandoff),
+      // exactly as buildTwig does; the disk's coneAxis keeps Lychee's shaft angle.
+      const baseSurfaceVec = baseSurface.normal;
+      const tipSurfaceVec = tipSurface.normal;
+      const jointDiameterA = twigJointDiameterForLocalDiameter(contactDiameterA);
+      const jointDiameterB = twigJointDiameterForLocalDiameter(contactDiameterB);
+
+      const diskThicknessA = twigDiskJointStandoff({
+        surfaceNormal: baseSurfaceVec,
+        coneAxis: { x: axisA.x, y: axisA.y, z: axisA.z },
+        profile: diskProfile,
+        jointDiameterMm: jointDiameterA,
+      });
+      const diskThicknessB = twigDiskJointStandoff({
+        surfaceNormal: tipSurfaceVec,
+        coneAxis: { x: axisB.x, y: axisB.y, z: axisB.z },
+        profile: diskProfile,
+        jointDiameterMm: jointDiameterB,
+      });
+
+      const socketJointA: Joint = {
+        id: uuidv4(),
+        pos: {
+          x: baseWorld.x + baseSurfaceVec.x * diskThicknessA,
+          y: baseWorld.y + baseSurfaceVec.y * diskThicknessA,
+          z: baseWorld.z + baseSurfaceVec.z * diskThicknessA,
+        },
+        diameter: jointDiameterA,
+      };
+      const socketJointB: Joint = {
+        id: uuidv4(),
+        pos: {
+          x: tipWorld.x + tipSurfaceVec.x * diskThicknessB,
+          y: tipWorld.y + tipSurfaceVec.y * diskThicknessB,
+          z: tipWorld.z + tipSurfaceVec.z * diskThicknessB,
+        },
+        diameter: jointDiameterB,
+      };
+
       const segment: Segment = {
         id: uuidv4(),
         type: 'straight',
         diameter: Math.min(contactDiameterA, contactDiameterB),
+        bottomJoint: socketJointA,
+        topJoint: socketJointB,
       };
 
       const twig: Twig = {
@@ -450,32 +597,32 @@ export function convertLysData(data: LysData, settings: SupportSettings, mesh?: 
         contactDiskA: {
           id: uuidv4(),
           pos: { x: baseWorld.x, y: baseWorld.y, z: baseWorld.z },
-          surfaceNormal: { x: transformedBaseNormal.x, y: transformedBaseNormal.y, z: transformedBaseNormal.z },
+          surfaceNormal: baseSurfaceVec,
           coneAxis: { x: axisA.x, y: axisA.y, z: axisA.z },
-          profile: {
-            type: 'disk',
-            diskThicknessMm: tipDefaults.diskThicknessMm ?? 0.1,
-            maxStandoffMm: tipDefaults.maxStandoffMm ?? 1.5,
-            standoffAngleThreshold: tipDefaults.standoffAngleThreshold ?? Math.PI / 4,
-          },
+          diskLengthOverride: diskThicknessA,
+          profile: diskProfile,
           contactDiameterMm: contactDiameterA,
         },
         contactDiskB: {
           id: uuidv4(),
           pos: { x: tipWorld.x, y: tipWorld.y, z: tipWorld.z },
-          surfaceNormal: { x: transformedTipNormal.x, y: transformedTipNormal.y, z: transformedTipNormal.z },
+          surfaceNormal: tipSurfaceVec,
           coneAxis: { x: axisB.x, y: axisB.y, z: axisB.z },
-          profile: {
-            type: 'disk',
-            diskThicknessMm: tipDefaults.diskThicknessMm ?? 0.1,
-            maxStandoffMm: tipDefaults.maxStandoffMm ?? 1.5,
-            standoffAngleThreshold: tipDefaults.standoffAngleThreshold ?? Math.PI / 4,
-          },
+          diskLengthOverride: diskThicknessB,
+          profile: diskProfile,
           contactDiameterMm: contactDiameterB,
         },
       };
 
       result.twigs?.push(twig);
+
+      // Register as a host so leaves/braces attached to this twig (PR #156)
+      // can resolve against it in later phases.
+      hostsByLysId.set(id, {
+        kind: 'twig',
+        shaftId: twig.id,
+        twig,
+      });
     }
 
     // -----------------------------------------------------------------------
@@ -771,6 +918,19 @@ export function convertLysData(data: LysData, settings: SupportSettings, mesh?: 
             };
           }
         }
+        // TWIG hosts: the knot MUST sit exactly on the twig's joint line (pos
+        // consistent with t), because the runtime knot interaction strictly
+        // reprojects twig-hosted knots onto the joint line (bottomJoint->topJoint).
+        // If we preserve the authored LYS point (which can be ~0.1mm off that line),
+        // pos and t describe DIFFERENT points: the initial render draws the off-line
+        // pos, then selecting the knot reprojects it onto the line — the leaf "snaps".
+        // Force the on-line projected point + 'project' hint so import == post-select.
+        let knotImportHint: Knot['_importHint'] = preserveAuthoredAttachPoint ? 'preserve' : 'project';
+        if (parentHost.kind === 'twig') {
+          knotPos = endpointRoles.attachProjection.pointOnLine;
+          knotImportHint = 'project';
+        }
+
         const knot: Knot = {
           id: uuidv4(),
           parentShaftId: endpointRoles.attachProjection.parentShaftId,
@@ -778,7 +938,7 @@ export function convertLysData(data: LysData, settings: SupportSettings, mesh?: 
           pos: knotPos,
           // Stamp preserve/project intent so normalization can honor it
           // rather than re-deriving it with potentially conflicting rules.
-          _importHint: preserveAuthoredAttachPoint ? 'preserve' : 'project',
+          _importHint: knotImportHint,
         };
         result.knots.push(knot);
 
@@ -808,15 +968,26 @@ export function convertLysData(data: LysData, settings: SupportSettings, mesh?: 
         if (isLeaf) {
           socketJoint.pos = knot.pos;
 
-          const conePosVec = new THREE.Vector3(contactCone.pos.x, contactCone.pos.y, contactCone.pos.z);
-          const coneToKnot = knotPosVec.clone().sub(conePosVec);
-          if (coneToKnot.lengthSq() > 1e-8) {
-            const leafDir = coneToKnot.normalize();
-            contactCone.normal = { x: leafDir.x, y: leafDir.y, z: leafDir.z };
+          // Aim + length the leaf cone with DragonFruit's CANONICAL cone math
+          // (recomputeLeafContactConeAxisAndLength, the SAME routine used by load
+          // normalization and the live knot-drag preview), instead of a one-shot
+          // tip->knot measurement. The canonical routine measures from a disk-thickness
+          // offset start (tip + surfaceNormal * calculateDiskThickness(...)) and iterates
+          // to converge. Doing it any other way leaves the imported cone's angle/length
+          // slightly off, so the leaf visibly "snaps" the first time its knot is dragged
+          // (the drag triggers the canonical recompute). The model contact point
+          // (contactCone.pos) is held FIXED here — only the knot-side angle/length change,
+          // so authored LYS clearances at the surface are preserved.
+          if (contactCone.surfaceNormal) {
+            const { axis, lengthMm } = recomputeLeafContactConeAxisAndLength(
+              contactCone.pos,
+              contactCone.surfaceNormal,
+              knot.pos,
+              contactCone.profile,
+            );
+            contactCone.normal = axis;
+            contactCone.profile.lengthMm = lengthMm;
           }
-
-          const leafConeLength = Math.max(0.1, conePosVec.distanceTo(knotPosVec));
-          contactCone.profile.lengthMm = leafConeLength;
 
           const tipEndpoint = inferLeafTipEndpoint(endpointRoles.tipPoint, pA, pB);
           const anchorEndpoint = tipEndpoint === 'tip' ? 'base' : 'tip';
@@ -834,6 +1005,26 @@ export function convertLysData(data: LysData, settings: SupportSettings, mesh?: 
 
           contactCone.profile.contactDiameterMm = contactDiameter;
           contactCone.profile.bodyDiameterMm = anchorDiameter;
+
+          // Leaf-on-TWIG must be built like a natively hand-placed leaf, or the
+          // knot/leaf won't behave identically to one the user creates. Native
+          // LeafPlacementController sizes the knot and the leaf's wide end from the
+          // twig's LOCAL taper diameter at the attach t (resolveTwigDiameterAtSegmentT),
+          // and the knot diameter via the 10% rule (twigJointDiameterForLocalDiameter).
+          // The importer otherwise leaves knot.diameter unset (→ 1.2mm render default,
+          // oversized) and sizes the cone body from LYS endpoint settings. Override both
+          // for twig hosts so an imported leaf-on-twig == a hand-placed one.
+          if (parentHost.kind === 'twig') {
+            const hostTwigDiameter = resolveTwigDiameterAtSegmentT(
+              parentHost.twig,
+              endpointRoles.attachProjection.parentShaftId,
+              endpointRoles.attachProjection.t,
+            );
+            if (hostTwigDiameter !== null && hostTwigDiameter > 0) {
+              contactCone.profile.bodyDiameterMm = hostTwigDiameter;
+              knot.diameter = twigJointDiameterForLocalDiameter(hostTwigDiameter);
+            }
+          }
 
           contactCone.socketJointId = socketJoint.id;
 
@@ -904,6 +1095,13 @@ export function convertLysData(data: LysData, settings: SupportSettings, mesh?: 
 
       if (parentHost.kind === 'kickstand') {
         console.warn(`[LysConverter] Kickstand candidate ${id} (object ${objectId}) cannot attach to kickstand parent ${String(parentId)}. Skipping.`);
+        continue;
+      }
+
+      if (parentHost.kind === 'twig') {
+        // Kickstands are grounded columns that attach to trunk/branch shafts
+        // per the supports anatomy. Twig parents don't fit that contract.
+        console.warn(`[LysConverter] Kickstand candidate ${id} (object ${objectId}) cannot attach to twig parent ${String(parentId)}. Skipping.`);
         continue;
       }
 
@@ -1084,12 +1282,34 @@ export function convertLysData(data: LysData, settings: SupportSettings, mesh?: 
         }
       }
 
+      // A brace knot must size itself to the shaft it lands on, at its position,
+      // exactly like a natively-placed knot — NOT to one shared generic brace
+      // diameter. On a tapered twig that means the local taper diameter at the
+      // knot's t, via the same 10% rule the leaf path and state normalization use
+      // (twigJointDiameterForLocalDiameter(resolveTwigDiameterAtSegmentT(...))).
+      // Without this, a brace endpoint on the thin end of a tapered twig renders
+      // far too thick. DragonFruit's tapered-brace rendering then falls out for
+      // free: the two endpoint knots simply carry different diameters. Non-twig
+      // hosts keep the generic getJointDiameter(braceDiameter).
+      const braceKnotDiameterForHost = (
+        host: HostEntry,
+        proj: { parentShaftId: string; t: number },
+      ): number => {
+        if (host.kind === 'twig') {
+          const localTwigDia = resolveTwigDiameterAtSegmentT(host.twig, proj.parentShaftId, proj.t);
+          if (localTwigDia !== null && localTwigDia > 0) {
+            return twigJointDiameterForLocalDiameter(localTwigDia);
+          }
+        }
+        return braceJointDiameter;
+      };
+
       const knotA: Knot = {
         id: uuidv4(),
         parentShaftId: pairing.projA.parentShaftId,
         t: pairing.projA.t,
         pos: knotPosA,
-        diameter: braceJointDiameter,
+        diameter: braceKnotDiameterForHost(hostA, pairing.projA),
         _importHint: 'braceImported',
       };
 
@@ -1098,7 +1318,7 @@ export function convertLysData(data: LysData, settings: SupportSettings, mesh?: 
         parentShaftId: pairing.projB.parentShaftId,
         t: pairing.projB.t,
         pos: knotPosB,
-        diameter: braceJointDiameter,
+        diameter: braceKnotDiameterForHost(hostB, pairing.projB),
         _importHint: 'braceImported',
       };
 

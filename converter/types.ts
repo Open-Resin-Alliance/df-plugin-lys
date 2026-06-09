@@ -3,6 +3,7 @@ import {
   Trunk,
   Branch,
   Knot,
+  Twig,
 } from '@/supports/types';
 import type { Kickstand } from '@/supports/SupportTypes/Kickstand/types';
 
@@ -95,4 +96,5 @@ export interface LysData {
 export type HostEntry =
   | { kind: 'trunk'; shaftId: string; trunk: Trunk; root: Roots }
   | { kind: 'branch'; shaftId: string; branch: Branch; parentKnot: Knot }
-  | { kind: 'kickstand'; shaftId: string; kickstand: Kickstand; root: Roots; hostKnot: Knot };
+  | { kind: 'kickstand'; shaftId: string; kickstand: Kickstand; root: Roots; hostKnot: Knot }
+  | { kind: 'twig'; shaftId: string; twig: Twig };
