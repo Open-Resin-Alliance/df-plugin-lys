@@ -4,8 +4,30 @@ import {
   Joint,
 } from '@/supports/types';
 import { SupportSettings } from '@/supports/Settings';
+import type {
+  ModelMeshModifiers,
+  ModelHollowingModifier,
+  ModelHolePunchPlacement,
+} from '@/features/mesh-modifiers/types';
 import { convertLysData } from './converter/convertLysData';
 import { LysData } from './converter/types';
+
+/** Base64-encode a typed array for storage in meshModifiers. */
+function bytesToBase64(bytes: Uint8Array): string {
+  if (typeof btoa === 'function') {
+    const CHUNK_SIZE = 0x8000;
+    let binary = '';
+    for (let i = 0; i < bytes.length; i += CHUNK_SIZE) {
+      const chunk = bytes.subarray(i, i + CHUNK_SIZE);
+      binary += String.fromCharCode(...chunk);
+    }
+    return btoa(binary);
+  }
+  if (typeof Buffer !== 'undefined') {
+    return Buffer.from(bytes).toString('base64');
+  }
+  throw new Error('No base64 encoding available');
+}
 
 /**
  * High-level adapter between raw parsed LYS data and DragonFruit import payloads.
@@ -322,5 +344,200 @@ export class LysConverter {
       if (kickstandBuild.hostKnot?.pos) rotPos(kickstandBuild.hostKnot.pos);
       rotSegments(kickstandBuild.kickstand.segments);
     }
+  }
+
+  /**
+   * Converts LYS hollowing settings and hole punches into DragonFruit ModelMeshModifiers.
+   *
+   * Extracts:
+   * - Object infill/hollowing preset → `ModelHollowingModifier`
+   * - Pre-computed cavity mesh (`_hollowing` geometry blob) → `cavityPositionsBase64`
+   * - Drain hole placements → `ModelHolePunchPlacement[]`
+   *
+   * @param sceneData        Raw decoded LYS scene payload (the full scene object).
+   * @param geometry         Optional geometry used to compute bounding box for hole-position normalisation.
+   * @param geometriesByName All parsed geometry blobs keyed by stem name. Used to
+   *                         locate `_hollowing` cavity meshes.
+   * @returns ModelMeshModifiers or undefined if no hollowing/hole data is found.
+   */
+  static convertHollowing(
+    sceneData: any,
+    geometry?: THREE.BufferGeometry,
+    geometriesByName?: Map<string, THREE.BufferGeometry>,
+  ): ModelMeshModifiers | undefined {
+    if (!sceneData) {
+      console.log('[LysConverter][convertHollowing] No sceneData — skipping');
+      return undefined;
+    }
+
+    const result: ModelMeshModifiers = {};
+
+    // -----------------------------------------------------------------------
+    // 1) Hollowing settings
+    //
+    // Lychee stores hollowing per-object (`objects.present.byId[ID].hollowing`).
+    // Some variants also carry a global fallback at `settings.objectInfill.preset`.
+    // We check per-object first, then fall back to the global path.
+    // -----------------------------------------------------------------------
+
+    // Scan all objects for per-object hollowing data.
+    let hollowingSource: any = null;
+    const objects = sceneData?.objects?.present?.byId as Record<string, any> | undefined;
+    if (objects) {
+      const objectIds = Object.keys(objects);
+      console.log(`[LysConverter][convertHollowing] Scanning ${objectIds.length} objects for per-object hollowing: [${objectIds.join(', ')}]`);
+      for (const [objId, obj] of Object.entries(objects)) {
+        const objAny = obj as any;
+        if (objAny?.hollowing) {
+          console.log(`[LysConverter][convertHollowing] Object ${objId} has hollowing: enabled=${objAny.hollowing.enabled}, outer=${objAny.hollowing.outer}`);
+          if (objAny.hollowing.enabled === true) {
+            hollowingSource = objAny.hollowing;
+            console.log(`[LysConverter][convertHollowing] Using per-object hollowing from ${objId}`);
+            break;
+          }
+        } else {
+          console.log(`[LysConverter][convertHollowing] Object ${objId} has no .hollowing property`);
+        }
+      }
+    } else {
+      console.log('[LysConverter][convertHollowing] No objects.present.byId found in sceneData');
+    }
+
+    // Fall back to the global `settings.objectInfill.preset` path.
+    if (!hollowingSource) {
+      const preset = sceneData?.settings?.objectInfill?.preset;
+      console.log('[LysConverter][convertHollowing] No per-object hollowing; checking settings.objectInfill.preset:', JSON.stringify(preset));
+      if (preset?.enabled === true) {
+        hollowingSource = preset;
+        console.log('[LysConverter][convertHollowing] Using global settings.objectInfill.preset');
+      }
+    }
+
+    if (hollowingSource) {
+      console.log('[LysConverter][convertHollowing] Hollowing found — outer:', hollowingSource.outer, 'infillInterval:', hollowingSource.infillInterval, 'infillEnabled:', hollowingSource.infillEnabled);
+      // Lychee doesn't expose voxel size — default to 0.5mm.
+      const hollowingModifier: ModelHollowingModifier = {
+        enabled: true,
+        mode: 'cavity',
+        voxelSizeMm: 0.5,
+        shellThicknessMm: hollowingSource.outer ?? 1.8,
+        infillMode: hollowingSource.infillEnabled ? 'lattice' : undefined,
+        infillCellMm: hollowingSource.infillInterval ?? 5,
+        infillBeamRadiusMm: 0.5,
+        openFace: 'z_max',
+        // Mark as baked — Lychee already pre-computed the cavity mesh (stored
+        // as `_hollowing` geometry). This keeps the hollowing panel from
+        // offering to re-apply voxel hollowing when the cavity is already
+        // available for Interior View.
+        bakedIntoGeometry: true,
+      };
+
+      // Lychee pre-computes the cavity interior mesh and stores it with a
+      // `_hollowing` suffix (e.g. `<hash>_hollowing`). Extract it so DragonFruit's
+      // Interior View can display the pre-baked cavity without re-hollowing.
+      if (geometriesByName) {
+        for (const [stem, cavityGeom] of geometriesByName) {
+          if (stem.toLowerCase().endsWith('_hollowing')) {
+            const posAttr = cavityGeom.getAttribute('position');
+            if (posAttr) {
+              const positions = posAttr.array as Float32Array;
+              const cavityBytes = new Uint8Array(positions.buffer, positions.byteOffset, positions.byteLength);
+              hollowingModifier.cavityPositionsBase64 = bytesToBase64(cavityBytes);
+              hollowingModifier.cavityPositionCount = positions.length / 3;
+              console.log(`[LysConverter][convertHollowing] Extracted _hollowing cavity mesh from "${stem}": ${positions.length / 3} vertices`);
+            }
+            break;
+          }
+        }
+      }
+
+      result.hollowing = hollowingModifier;
+      console.log('[LysConverter][convertHollowing] Hollowing modifier set:', JSON.stringify(result.hollowing));
+    } else {
+      console.log('[LysConverter][convertHollowing] No hollowing settings found in scene');
+    }
+
+    // -----------------------------------------------------------------------
+    // 2) Hole punches (drain holes)
+    // -----------------------------------------------------------------------
+    const holes = sceneData?.holes?.present?.byId as Record<string, any> | undefined;
+    const holeCount = holes ? Object.keys(holes).length : 0;
+    console.log(`[LysConverter][convertHollowing] holes.present.byId has ${holeCount} entries`);
+    if (holes && holeCount > 0) {
+      // Compute bounding box once for coordinate normalisation.
+      geometry?.computeBoundingBox();
+      const bbox = geometry?.boundingBox ?? null;
+      const size = bbox ? bbox.getSize(new THREE.Vector3()) : null;
+
+      const placements: ModelHolePunchPlacement[] = [];
+
+      for (const [holeId, hole] of Object.entries(holes)) {
+        if (!hole) {
+          console.log(`[LysConverter][convertHollowing] Skipping hole ${holeId}: null/undefined entry`);
+          continue;
+        }
+
+        // LYS holes are always cylinders — the `type` field is often absent.
+        const lysType = hole.type as string | undefined;
+        if (lysType && lysType !== 'cylinder') {
+          console.log(`[LysConverter][convertHollowing] Skipping hole ${holeId}: non-cylinder type="${lysType}"`);
+          continue;
+        }
+
+        // Extract position + direction from column-major 4x4 stlMatrix.
+        const stlMatrix: number[] | undefined = hole.stlMatrix;
+        let pos = new THREE.Vector3(0, 0, 0);
+        let dir = new THREE.Vector3(0, 0, -1);
+
+        if (stlMatrix && stlMatrix.length >= 16) {
+          // Translation = column 3 (indices 12,13,14)
+          pos.set(stlMatrix[12], stlMatrix[13], stlMatrix[14]);
+          // Z-axis = column 2 (indices 8,9,10) — the cylinder axis
+          const zAxis = new THREE.Vector3(stlMatrix[8], stlMatrix[9], stlMatrix[10]);
+          if (zAxis.lengthSq() > 1e-8) {
+            dir.copy(zAxis.normalize());
+          }
+        }
+
+        // Normalise position to 0–1 range relative to bounding box.
+        let centerNorm: [number, number, number] = [0.5, 0.5, 0.5];
+        if (size && bbox) {
+          centerNorm = [
+            size.x > 1e-9
+              ? Math.max(0, Math.min(1, (pos.x - bbox.min.x) / size.x))
+              : 0.5,
+            size.y > 1e-9
+              ? Math.max(0, Math.min(1, (pos.y - bbox.min.y) / size.y))
+              : 0.5,
+            size.z > 1e-9
+              ? Math.max(0, Math.min(1, (pos.z - bbox.min.z) / size.z))
+              : 0.5,
+          ];
+        }
+
+        const radiusMm = (hole.diameter ?? 2) / 2;
+        const depthMm = hole.depth ?? 3;
+        console.log(`[LysConverter][convertHollowing] Hole ${holeId}: pos=(${pos.x.toFixed(2)}, ${pos.y.toFixed(2)}, ${pos.z.toFixed(2)}), dir=(${dir.x.toFixed(3)}, ${dir.y.toFixed(3)}, ${dir.z.toFixed(3)}), radius=${radiusMm}, depth=${depthMm}`);
+
+        placements.push({
+          id: hole.id || `lys-hole-${holeId}`,
+          centerNorm,
+          radiusMm,
+          depthMm,
+          direction: [dir.x, dir.y, dir.z],
+        });
+      }
+
+      if (placements.length > 0) {
+        result.holePunches = placements;
+        console.log(`[LysConverter][convertHollowing] Extracted ${placements.length} hole punches`);
+      } else {
+        console.log('[LysConverter][convertHollowing] No cylinder holes found after filtering');
+      }
+    }
+
+    const hasResult = Object.keys(result).length > 0;
+    console.log(`[LysConverter][convertHollowing] Returning ${hasResult ? 'meshModifiers' : 'undefined'} (hollowing=${!!result.hollowing}, holes=${result.holePunches?.length ?? 0})`);
+    return hasResult ? result : undefined;
   }
 }

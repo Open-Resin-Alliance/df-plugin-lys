@@ -1,5 +1,6 @@
 import { useState, useCallback } from 'react';
 import * as THREE from 'three';
+import type { ModelMeshModifiers } from '@/features/mesh-modifiers/types';
 import { LysParser } from './LysParser';
 import { LysConverter } from './LysConverter';
 import { createDefaultSettings } from '@/supports/Settings/types';
@@ -437,7 +438,13 @@ export function useLysImport() {
             }
 
             setIsLoading(false);
-            return { geometry: data.geometry, transform: lysTransform, modelId: importedModelId, supportData: dragonfruitData };
+            return {
+                geometry: data.geometry,
+                transform: lysTransform,
+                modelId: importedModelId,
+                supportData: dragonfruitData,
+                meshModifiers: LysConverter.convertHollowing(data.sceneData, data.geometry),
+            };
         } catch (err) {
             console.error("[useLysImport] Import Failed:", err);
             setError(err instanceof Error ? err.message : String(err));

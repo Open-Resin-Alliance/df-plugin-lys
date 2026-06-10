@@ -8,6 +8,7 @@
 
 import { useState, useCallback, useRef } from 'react';
 import * as THREE from 'three';
+import type { ModelMeshModifiers } from '@/features/mesh-modifiers/types';
 import { LysConverter } from './LysConverter';
 import { loadFromImportFormat } from '@/supports/state';
 import { updateRaftSettings } from '@/supports/Rafts/Crenelated/RaftState';
@@ -50,6 +51,7 @@ export interface LysSceneImportResult {
     scale: THREE.Vector3;
   };
   supportCount: number;
+  meshModifiers?: ModelMeshModifiers;
 }
 
 export type ImportPhase = 'idle' | 'awaiting_stl' | 'processing';
@@ -249,7 +251,8 @@ export function useLysSceneImport() {
           rotation: finalRotation,
           scale: finalScale
         },
-        supportCount: converted.trunks.length
+        supportCount: converted.trunks.length,
+        meshModifiers: LysConverter.convertHollowing(pending.json, geometry.geometry),
       };
 
       console.log('[LysSceneImport] Import complete:', {

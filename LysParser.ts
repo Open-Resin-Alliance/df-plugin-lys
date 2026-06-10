@@ -165,7 +165,15 @@ export class LysParser {
         }
 
         const sortedCandidates = [...uniqueCandidates.entries()]
-            .sort(([, a], [, b]) => b.blob.byteLength - a.blob.byteLength);
+            .sort(([, a], [, b]) => {
+                // Prefer non-`_hollowing` stems as primary geometry — the `_hollowing`
+                // suffix is a Lychee convention for cavity-interior meshes which should
+                // never serve as the support-placement surface.
+                const aIsHollowing = a.stem.toLowerCase().endsWith('_hollowing');
+                const bIsHollowing = b.stem.toLowerCase().endsWith('_hollowing');
+                if (aIsHollowing !== bIsHollowing) return aIsHollowing ? 1 : -1;
+                return b.blob.byteLength - a.blob.byteLength;
+            });
 
         let geometry: THREE.BufferGeometry | null = null;
         const geometriesByName = new Map<string, THREE.BufferGeometry>();

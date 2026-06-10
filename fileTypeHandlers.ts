@@ -1,12 +1,29 @@
 import * as THREE from 'three';
 import type { PluginFileTypeHandler } from '@/features/plugins/pluginFileTypeBridge';
 import type { PluginFileTypeDefinition } from '@/features/plugins/complexPluginContracts';
+import type { ModelMeshModifiers } from '@/features/mesh-modifiers/types';
+import { hollowFromGeometry, type HollowOptions } from '@/utils/meshHollowing';
 import { LysParser } from './LysParser';
 import { LysConverter } from './LysConverter';
 import { createDefaultSettings } from '@/supports/Settings/types';
 import { computeLowestZ } from '@/utils/geometry';
 import { eulerFromGlobalEuler, quaternionFromGlobalEulerDegrees } from '@/utils/rotation';
 import { generateUuid } from '@/utils/uuid';
+
+/** Base64-encode a typed array for cavity position storage. */
+function bytesToBase64(bytes: Uint8Array): string {
+  if (typeof btoa === 'function') {
+    const CHUNK_SIZE = 0x8000;
+    let binary = '';
+    for (let i = 0; i < bytes.length; i += CHUNK_SIZE) {
+      const chunk = bytes.subarray(i, i + CHUNK_SIZE);
+      binary += String.fromCharCode(...chunk);
+    }
+    return btoa(binary);
+  }
+  if (typeof Buffer !== 'undefined') return Buffer.from(bytes).toString('base64');
+  throw new Error('No base64 encoding available');
+}
 
 /**
  * File-type import bridge for `.lys` scene files.
@@ -33,6 +50,8 @@ export type LysImportPayload = {
   };
   /** DragonFruit internal support format, ready for `loadFromImportFormat`. */
   supportData: ReturnType<typeof LysConverter.convert> | null;
+  /** Hollowing configuration and hole punches extracted from LYS scene data. */
+  meshModifiers?: ModelMeshModifiers;
 };
 
 // ---------------------------------------------------------------------------
@@ -185,6 +204,12 @@ function normalizeGeometryLookupKey(raw: string): string {
 
 /**
  * Returns the only geometry entry when exactly one normalized key is present.
+ *
+ * When multiple keys exist but one is a `_hollowing` variant of another
+ * (e.g. `9d7a...614` + `9d7a...614_hollowing`), the non-hollowing key is
+ * returned as the primary geometry. The `_hollowing` suffix is a Lychee
+ * convention for cavity-interior meshes and should never be used as the
+ * primary surface for support placement.
  */
 function getSingleNormalizedGeometry(
   geometriesByName: Map<string, THREE.BufferGeometry>,
@@ -195,7 +220,23 @@ function getSingleNormalizedGeometry(
     if (!norm) continue;
     if (!byNorm.has(norm)) byNorm.set(norm, geometry);
   }
-  if (byNorm.size !== 1) return null;
+  if (byNorm.size === 0) return null;
+
+  // Single entry → trivial return.
+  if (byNorm.size === 1) {
+    const [key, geometry] = byNorm.entries().next().value as [string, THREE.BufferGeometry];
+    return { key, geometry };
+  }
+
+  // Multiple entries: prefer the primary (non-hollowing) variant.
+  const hollowingSuffix = '_hollowing';
+  for (const [norm, geometry] of byNorm) {
+    if (norm.endsWith(hollowingSuffix)) continue;
+    // Found a non-hollowing key — use it.
+    return { key: norm, geometry };
+  }
+
+  // All keys are `_hollowing` variants — use the first one.
   const [key, geometry] = byNorm.entries().next().value as [string, THREE.BufferGeometry];
   return { key, geometry };
 }
@@ -315,6 +356,7 @@ function convertSingleObject(
   settings: ReturnType<typeof createDefaultSettings>,
   importCenterX: number,
   importCenterY: number,
+  lysGeometriesByName: Map<string, THREE.BufferGeometry>,
 ): LysImportPayload {
   // Stage 1: prepare filtered object-local scene payload.
   const importedModelId = generateUuid();
@@ -420,7 +462,16 @@ function convertSingleObject(
     supportSummary: summarizeImportSupportData(dragonfruitData),
   });
 
-  return { modelId: importedModelId, geometry: objGeometry, transform, supportData: dragonfruitData };
+  const meshModifiers = LysConverter.convertHollowing(sceneDataForConvert, objGeometry, lysGeometriesByName);
+  console.log('[lys-import][debug] convertSingleObject meshModifiers:', meshModifiers ? `hollowing=${!!meshModifiers.hollowing} holes=${meshModifiers.holePunches?.length ?? 0}` : 'undefined');
+
+  return {
+    modelId: importedModelId,
+    geometry: objGeometry,
+    transform,
+    supportData: dragonfruitData,
+    meshModifiers,
+  };
 }
 
 export async function importLysFile(
@@ -455,8 +506,12 @@ export async function importLysFile(
         scale: new THREE.Vector3(1, 1, 1),
       },
       supportData: null,
+      meshModifiers: LysConverter.convertHollowing(data.sceneData, data.geometry, data.geometriesByName),
     };
   }
+
+  console.log('[lys-import][debug] After parser — sceneData keys:', Object.keys(data.sceneData ?? {}).join(', '));
+  console.log('[lys-import][debug] sceneData.objects?.present?.byId keys:', Object.keys(data.sceneData?.objects?.present?.byId ?? {}).join(', ') || '(none)');
 
   const objects: Record<string, any> = data.sceneData.objects.present?.byId ?? {};
   const supports: Record<string, any> = data.sceneData.supports.present?.byId ?? {};
@@ -537,6 +592,7 @@ export async function importLysFile(
       const payload = convertSingleObject(
         objId, obj, objGeom, supportsForObj,
         sceneDataForConvert, settings, 0, 0, // no center shift for multi-model
+        data.geometriesByName,
       );
       payloads.push(payload);
     }
@@ -589,7 +645,7 @@ export async function importLysFile(
     }
   }
 
-  const singleGeom =
+  let singleGeom =
     (targetObjId ? data.geometriesByName.get(targetObjId) ?? data.geometriesByName.get(targetObjId.toLowerCase()) : null)
     ?? data.geometry;
 
@@ -701,6 +757,80 @@ export async function importLysFile(
     }
   }
 
+  const finalMeshModifiers = LysConverter.convertHollowing(sceneDataForConvert, singleGeom, data.geometriesByName);
+  console.log('[lys-import][debug] single-model meshModifiers:', finalMeshModifiers ? `hollowing=${!!finalMeshModifiers.hollowing} holes=${finalMeshModifiers.holePunches?.length ?? 0}` : 'undefined');
+
+  // ── Physically hollow the geometry when the Rust backend is available ──
+  // Instead of leaving the model solid + a separate cavity mesh, call the
+  // voxel engine right here so the model loads as physically hollowed.
+  // The original solid geometry is snapshotted so "Remove Hollowing" can
+  // restore it later.
+  if (finalMeshModifiers?.hollowing?.enabled && singleGeom.boundingBox) {
+    const bboxSize = singleGeom.boundingBox.getSize(new THREE.Vector3());
+    const maxExtent = Math.max(bboxSize.x, bboxSize.y, bboxSize.z);
+    const shellThickness = finalMeshModifiers.hollowing.shellThicknessMm ?? 2;
+
+    // Simple voxel resolution: aim for ~0.5mm voxels relative to model size.
+    const voxelResolution = Math.max(32, Math.min(256,
+      Math.round(maxExtent / (finalMeshModifiers.hollowing.voxelSizeMm ?? 0.5))
+    ));
+
+    // Snapshot the original solid geometry for later "Remove Hollowing".
+    const posAttr = singleGeom.getAttribute('position');
+    if (posAttr) {
+      const srcFloats = posAttr.array instanceof Float32Array
+        ? posAttr.array
+        : new Float32Array(posAttr.array);
+      const srcBytes = new Uint8Array(srcFloats.buffer, srcFloats.byteOffset, srcFloats.byteLength);
+      finalMeshModifiers.hollowing!.sourcePositionsBase64 = bytesToBase64(srcBytes);
+      finalMeshModifiers.hollowing!.sourcePositionCount = posAttr.count;
+    }
+
+    const hollowOptions: HollowOptions = {
+      mode: finalMeshModifiers.hollowing.mode === 'shell_open_face' ? 'cavity' : finalMeshModifiers.hollowing.mode,
+      voxelResolution,
+      shellThicknessMm: shellThickness,
+      infillMode: finalMeshModifiers.hollowing.infillMode ?? 'lattice',
+      infillCellMm: finalMeshModifiers.hollowing.infillCellMm ?? 5,
+      infillBeamRadiusMm: finalMeshModifiers.hollowing.infillBeamRadiusMm ?? 0.5,
+      openFace: finalMeshModifiers.hollowing.openFace,
+      drainHoles: [],
+      previewCavityOnly: false,
+      // Skip expensive smoothing for import — the mesh already has a
+      // pre-computed cavity from Lychee and just needs a dumb boolean merge.
+      smoothInternalSurfaces: false,
+      internalChamferPasses: 0,
+    };
+
+    try {
+      console.log('[lys-import] Applying voxel hollowing with shellThickness:', shellThickness);
+      const hollowResult = await hollowFromGeometry(singleGeom, hollowOptions);
+      if (hollowResult) {
+        console.log('[lys-import] Hollowing succeeded — replacing geometry');
+        const hollowedGeometry = new THREE.BufferGeometry();
+        hollowedGeometry.setAttribute('position', new THREE.BufferAttribute(hollowResult.positions, 3));
+        hollowedGeometry.computeVertexNormals();
+        hollowedGeometry.computeBoundingBox();
+        singleGeom = hollowedGeometry;
+
+        // Store cavity positions from the Rust engine for Interior View.
+        if (hollowResult.cavityPositions) {
+          const bytes = new Uint8Array(
+            hollowResult.cavityPositions.buffer,
+            hollowResult.cavityPositions.byteOffset,
+            hollowResult.cavityPositions.byteLength,
+          );
+          finalMeshModifiers.hollowing!.cavityPositionsBase64 = bytesToBase64(bytes);
+          finalMeshModifiers.hollowing!.cavityPositionCount = hollowResult.cavityPositions.length / 3;
+        }
+        finalMeshModifiers.hollowing!.bakedIntoGeometry = true;
+        console.log('[lys-import] Hollowing applied — new vertex count:', hollowResult.positions.length / 3);
+      }
+    } catch (err) {
+      console.warn('[lys-import] Voxel hollowing failed (likely browser mode), using cavity-only approach:', err);
+    }
+  }
+
   console.log('[lys-import][debug] single-model payload generated', {
     targetObjId,
     importedModelId,
@@ -712,6 +842,7 @@ export async function importLysFile(
     geometry: singleGeom,
     transform,
     supportData: dragonfruitData,
+    meshModifiers: finalMeshModifiers,
   };
 }
 // ---------------------------------------------------------------------------
