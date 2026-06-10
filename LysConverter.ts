@@ -477,25 +477,35 @@ export class LysConverter {
           continue;
         }
 
-        // LYS holes are always cylinders — the `type` field is often absent.
-        const lysType = hole.type as string | undefined;
+        // LYS holes are always cylinders — check `settings.type` first, then top-level `type`.
+        const lysType = (hole.settings?.type as string | undefined) ?? (hole.type as string | undefined);
         if (lysType && lysType !== 'cylinder') {
           console.log(`[LysConverter][convertHollowing] Skipping hole ${holeId}: non-cylinder type="${lysType}"`);
           continue;
         }
 
-        // Extract position + direction from column-major 4x4 stlMatrix.
-        const stlMatrix: number[] | undefined = hole.stlMatrix;
+        // LYS holes store position at `tip` (surface contact point) and
+        // direction at `tipNormal` (outward-pointing surface normal).
+        // The hole punch direction must point INWARD (into the model), so
+        // we negate the normal. Some variants use a 4x4 `stlMatrix` instead
+        // — fall back to that, then to defaults.
         let pos = new THREE.Vector3(0, 0, 0);
         let dir = new THREE.Vector3(0, 0, -1);
 
-        if (stlMatrix && stlMatrix.length >= 16) {
-          // Translation = column 3 (indices 12,13,14)
-          pos.set(stlMatrix[12], stlMatrix[13], stlMatrix[14]);
-          // Z-axis = column 2 (indices 8,9,10) — the cylinder axis
-          const zAxis = new THREE.Vector3(stlMatrix[8], stlMatrix[9], stlMatrix[10]);
-          if (zAxis.lengthSq() > 1e-8) {
-            dir.copy(zAxis.normalize());
+        if (hole.tip && typeof hole.tip.x === 'number') {
+          pos.set(hole.tip.x, hole.tip.y, hole.tip.z);
+          if (hole.tipNormal && typeof hole.tipNormal.x === 'number') {
+            const n = new THREE.Vector3(hole.tipNormal.x, hole.tipNormal.y, hole.tipNormal.z);
+            if (n.lengthSq() > 1e-8) dir.copy(n.normalize().negate());
+          }
+        } else {
+          const stlMatrix: number[] | undefined = hole.stlMatrix;
+          if (stlMatrix && stlMatrix.length >= 16) {
+            // Translation = column 3 (indices 12,13,14)
+            pos.set(stlMatrix[12], stlMatrix[13], stlMatrix[14]);
+            // Z-axis = column 2 (indices 8,9,10) — the cylinder axis
+            const zAxis = new THREE.Vector3(stlMatrix[8], stlMatrix[9], stlMatrix[10]);
+            if (zAxis.lengthSq() > 1e-8) dir.copy(zAxis.normalize());
           }
         }
 
@@ -515,8 +525,12 @@ export class LysConverter {
           ];
         }
 
-        const radiusMm = (hole.diameter ?? 2) / 2;
-        const depthMm = hole.depth ?? 3;
+        // Diameter/depth come from `settings`, then fall back to top-level fields.
+        const settings = hole.settings;
+        const diameter = (settings?.diameter ?? hole.diameter ?? 2) as number;
+        const depth = (settings?.depth ?? hole.depth ?? 3) as number;
+        const radiusMm = diameter / 2;
+        const depthMm = depth;
         console.log(`[LysConverter][convertHollowing] Hole ${holeId}: pos=(${pos.x.toFixed(2)}, ${pos.y.toFixed(2)}, ${pos.z.toFixed(2)}), dir=(${dir.x.toFixed(3)}, ${dir.y.toFixed(3)}, ${dir.z.toFixed(3)}), radius=${radiusMm}, depth=${depthMm}`);
 
         placements.push({
