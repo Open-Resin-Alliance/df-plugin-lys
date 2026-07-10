@@ -534,6 +534,7 @@ export function convertLysData(data: LysData, settings: SupportSettings, mesh?: 
         diskThicknessMm: tipDefaults.diskThicknessMm ?? 0.1,
         maxStandoffMm: tipDefaults.maxStandoffMm ?? 1.5,
         standoffAngleThreshold: tipDefaults.standoffAngleThreshold ?? Math.PI / 4,
+        penetrationMm: Math.max(0, tipDefaults.penetrationMm ?? 0),
       };
 
       // Disk-end joints, built with the SAME native standoff/taper anatomy the editor
