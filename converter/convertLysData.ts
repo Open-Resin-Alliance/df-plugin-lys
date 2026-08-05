@@ -534,6 +534,7 @@ export function convertLysData(data: LysData, settings: SupportSettings, mesh?: 
         diskThicknessMm: tipDefaults.diskThicknessMm ?? 0.1,
         maxStandoffMm: tipDefaults.maxStandoffMm ?? 1.5,
         standoffAngleThreshold: tipDefaults.standoffAngleThreshold ?? Math.PI / 4,
+        penetrationMm: Math.max(0, tipDefaults.penetrationMm ?? 0),
       };
 
       // Disk-end joints, built with the SAME native standoff/taper anatomy the editor
@@ -555,12 +556,14 @@ export function convertLysData(data: LysData, settings: SupportSettings, mesh?: 
         coneAxis: { x: axisA.x, y: axisA.y, z: axisA.z },
         profile: diskProfile,
         jointDiameterMm: jointDiameterA,
+        contactDiameterMm: contactDiameterA,
       });
       const diskThicknessB = twigDiskJointStandoff({
         surfaceNormal: tipSurfaceVec,
         coneAxis: { x: axisB.x, y: axisB.y, z: axisB.z },
         profile: diskProfile,
         jointDiameterMm: jointDiameterB,
+        contactDiameterMm: contactDiameterB,
       });
 
       const socketJointA: Joint = {
