@@ -1754,7 +1754,7 @@ describe('LysConverter', () => {
         // end, base well off the plate, mini unchecked, type 0. Screening on
         // type === 1 sent it to the root/trunk path, which built a shaft from the
         // plate up through the model.
-        const TYPE0_STICK = {
+        const TYPE0_STICK: LysData = {
             objects: {
                 present: {
                     byId: {
@@ -1793,7 +1793,7 @@ describe('LysConverter', () => {
             }
         };
 
-        const result = LysConverter.convert(TYPE0_STICK as any, createDefaultSettings());
+        const result = LysConverter.convert(TYPE0_STICK, createDefaultSettings());
 
         assert.strictEqual(result.sticks?.length ?? 0, 1, 'A 5.91mm two-contact support is a stick');
         assert.strictEqual(result.trunks.length, 0, 'It must not become a grounded trunk');
@@ -1816,7 +1816,7 @@ describe('LysConverter', () => {
         // Lychee marks "Mini Support" across every type value. Screening on
         // type === 1 first sent type-0 minis to the root/trunk path, which built
         // a grounded shaft into the model instead of a mesh-to-mesh span.
-        const MINI_TYPE0 = {
+        const MINI_TYPE0: LysData = {
             objects: {
                 present: {
                     byId: {
@@ -1855,7 +1855,7 @@ describe('LysConverter', () => {
             }
         };
 
-        const result = LysConverter.convert(MINI_TYPE0 as any, createDefaultSettings());
+        const result = LysConverter.convert(MINI_TYPE0, createDefaultSettings());
 
         assert.strictEqual(result.twigs?.length ?? 0, 1, 'A type-0 mini must import as a twig');
         assert.strictEqual(result.trunks.length, 0, 'A mini must not become a grounded trunk');
@@ -1866,7 +1866,7 @@ describe('LysConverter', () => {
         // LYS authors a hub as a single junction. Minting a knot per brace
         // endpoint stacked identical knots on one shaft, so dragging one moved
         // only its own brace.
-        const HUB_DATA = {
+        const HUB_DATA: LysData = {
             objects: {
                 present: {
                     byId: {
@@ -1921,7 +1921,7 @@ describe('LysConverter', () => {
             }
         };
 
-        const result = LysConverter.convert(HUB_DATA as any, createDefaultSettings());
+        const result = LysConverter.convert(HUB_DATA, createDefaultSettings());
 
         assert.strictEqual(result.braces.length, 2, 'Both braces should import');
 
@@ -1951,7 +1951,7 @@ describe('LysConverter', () => {
     it('should attach braces whose parent is a stick', () => {
         // Sticks host children exactly as twigs do; before they were registered
         // as hosts, a brace naming one was dropped with an "unprocessed parent" warning.
-        const STICK_PARENT_BRACE_DATA = {
+        const STICK_PARENT_BRACE_DATA: LysData = {
             objects: {
                 present: {
                     byId: {
@@ -2011,7 +2011,7 @@ describe('LysConverter', () => {
         console.warn = (...args: unknown[]) => { warnings.push(args.join(' ')); };
         let result;
         try {
-            result = LysConverter.convert(STICK_PARENT_BRACE_DATA as any, createDefaultSettings());
+            result = LysConverter.convert(STICK_PARENT_BRACE_DATA, createDefaultSettings());
         } finally {
             console.warn = originalWarn;
         }
