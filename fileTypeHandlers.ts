@@ -40,9 +40,22 @@ function bytesToBase64(bytes: Uint8Array): string {
  * Structured result from a successful LYS file import.
  * The host scene manager consumes this payload to create scene objects and
  * load support geometry.
+ *
+ * Structurally a `PluginSceneImportModel` (see the host's pluginFileTypeBridge):
+ * `modelId` is the contract binding this model to its supports. The host uses it
+ * as the model id AND stamps it onto every support in `supportData`, so the two
+ * must describe the same model. On the multi-object path each payload carries
+ * only the supports `buildSupportsByOwner` assigned to that object, resolved
+ * from the LYS file's own `objectIdTip`/`objectIdBase`.
  */
 export type LysImportPayload = {
   modelId: string;
+  /**
+   * Display name derived from the object's `name` field in the LYS scene data
+   * (e.g. "Archers_Assembled05"). Extension stripped if present. Undefined when
+   * the scene object has no name; the host falls back to the project filename.
+   */
+  objName?: string;
   geometry: THREE.BufferGeometry;
   transform: {
     position: THREE.Vector3;
@@ -318,6 +331,18 @@ export function resolveObjectGeometryMatch(
   return { geometry: null, matchSource: 'none' };
 }
 
+/**
+ * Derive a display name from a LYS scene object's `name` field.
+ * Strips trailing 3D-model extensions so the host shows "Archers_Assembled05"
+ * rather than "Archers_Assembled05.stl". Returns undefined when the field is
+ * absent or blank so the host can fall back to the project filename.
+ */
+function deriveModelName(name: unknown): string | undefined {
+  const raw = (typeof name === 'string' ? name : '').trim();
+  if (!raw) return undefined;
+  return raw.replace(/\.(stl|obj|ply|3mf)$/i, '');
+}
+
 /** Normalize an LYS objectId field (may be string or number) to a string, or null. */
 function normLysObjectId(val: unknown): string | null {
   if (typeof val === 'string' && val.trim()) return val.trim();
@@ -484,6 +509,7 @@ function convertSingleObject(
 
   return {
     modelId: importedModelId,
+    objName: deriveModelName(rawObj.name),
     geometry: objGeometry,
     transform,
     supportData: dragonfruitData,
@@ -656,6 +682,7 @@ export async function importLysFile(
     console.log('[lys-import][debug] multi-model payloads generated', {
       payloadCount: payloads.length,
       modelIds: payloads.map((p) => p.modelId),
+      objNames: payloads.map((p) => p.objName ?? '(none)'),
       supportSummaries: payloads.map((p) => ({ modelId: p.modelId, ...summarizeImportSupportData(p.supportData) })),
     });
 
@@ -896,6 +923,10 @@ export async function importLysFile(
 
   return {
     modelId: importedModelId,
+    // Single-model path needs objName too: a one-object .lys still carries the
+    // object's own name, and without this the host falls back to the project
+    // filename. The multi-object path gets it via convertSingleObject.
+    objName: deriveModelName(convertObjects?.[targetObjId]?.name),
     geometry: singleGeom,
     transform,
     supportData: dragonfruitData,
