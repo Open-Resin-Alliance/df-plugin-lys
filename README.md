@@ -22,7 +22,6 @@ Built-in DragonFruit plugin for importing `.lys` scene files and converting thei
 - `fileTypeHandlers.ts` — scene-file import bridge used by host file importer.
 - `LysParser.ts` — container parsing, manifest extraction, scene payload decode, geometry decode.
 - `LysConverter.ts` — conversion into DragonFruit support primitives.
-- `useLysImport.ts` / `useLysSceneImport.ts` — React hook paths for import flows.
 
 ## Protected payload decode note
 

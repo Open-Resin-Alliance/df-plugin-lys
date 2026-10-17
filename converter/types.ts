@@ -66,7 +66,7 @@ export interface LysSupport {
   settings?: LysSupportSettings;
   objectIdTip?: string | number | null;
   objectIdBase?: string | number | null;
-  /** Parent-like fields vary by LYS variant; extractParentIds() reads them all. */
+  /** Parent-like fields vary by LYS variant. Only the per-end refs are read. */
   parentId?: string | string[] | number | null;
   parentIds?: string | string[] | number | null;
   parent?: string | string[] | number | null;
@@ -132,7 +132,7 @@ export interface LysHole {
 }
 
 /**
- * Minimal scene payload shape consumed by `convertLysData`.
+ * Minimal scene payload shape consumed by the converter's read pass.
  */
 export interface LysData {
   objects?: { present?: { byId?: Record<string, LysObject> } };
