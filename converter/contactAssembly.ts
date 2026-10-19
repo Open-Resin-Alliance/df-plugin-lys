@@ -6,6 +6,8 @@ import { getJointDiameter } from '@/supports/constants';
 import { calculateSmoothedNormal } from '@/supports/PlacementLogic/PlacementUtils';
 import { calculateDiskThickness } from '@/supports/SupportPrimitives/ContactDisk/contactDiskUtils';
 import { LysSupport, LysTipSettings } from './types';
+import { pickDiskStandoff } from './helpers';
+import { raycastMeshBVH } from './meshRaycast';
 import type { TipProfile } from '@/supports/Settings/types';
 
 /**
@@ -131,7 +133,7 @@ export function createContactAssembly(
     const rayOrigin = socketPosVec.clone();
     const rayDir = tipWorld.clone().sub(socketPosVec).normalize();
     raycaster.set(rayOrigin, rayDir);
-    const intersects = raycaster.intersectObject(mesh, false);
+    const intersects = raycastMeshBVH(mesh, raycaster);
 
     if (intersects.length > 0) {
       const hit = intersects[0];
@@ -147,9 +149,7 @@ export function createContactAssembly(
     contactDiameterMm: tipSettings?.pointDiameter || tipDefaults.contactDiameterMm,
     // The wide end meets the shaft; `tip.diameter` names the cone alone.
     bodyDiameterMm: socketShaftDiameter ?? tipBodyDiameter,
-    diskThicknessMm: tipDefaults.diskThicknessMm ?? 0.1,
-    maxStandoffMm: tipDefaults.maxStandoffMm ?? 0.25,
-    standoffAngleThreshold: tipDefaults.standoffAngleThreshold ?? Math.PI / 4,
+    ...pickDiskStandoff(tipDefaults),
     penetrationMm: tipDefaults.penetrationMm
   };
 

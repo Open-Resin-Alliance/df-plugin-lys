@@ -43,7 +43,7 @@ const MOCK_LYS_DATA = {
                         base: { joinDiameter: 0.8 },
                         tip: { diameter: 0.6, length: 2 }
                     },
-                    parentId: ['s1'] // Linked to s1
+                    parentBaseId: 's1' // Linked to s1
                 },
                 // 3. BRACE scenario: connect s1 to a second root (s3)
                 's3': {
@@ -59,7 +59,8 @@ const MOCK_LYS_DATA = {
                     settings: {
                         base: { joinDiameter: 0.5 }
                     },
-                    parentId: ['s1', 's3'] // Connected to both
+                    parentBaseId: 's1',
+                    parentTipId: 's3' // Connected to both
                 }
             }
         }
@@ -503,66 +504,6 @@ describe('LysConverter', () => {
             'Fallback-imported child knot should attach to a real trunk segment');
     });
 
-    it('should infer single-parent attach endpoint from endpoint normals before distance heuristic', () => {
-        const NORMAL_INFERRED_ENDPOINT_DATA = {
-            objects: {
-                present: {
-                    byId: {
-                        o1: {
-                            id: 'o1',
-                            formerCenter: { x: 0, y: 0, z: 0 },
-                            position: { x: 0, y: 0, z: 0 },
-                            rotation: { x: 0, y: 0, z: 0 },
-                            scale: { x: 1, y: 1, z: 1 },
-                        }
-                    }
-                }
-            },
-            supports: {
-                present: {
-                    byId: {
-                        s_root: {
-                            id: 's_root',
-                            base: { x: 0, y: 0, z: 0 },
-                            tip: { x: 0, y: 0, z: 20 },
-                            parentId: [],
-                            objectIdTip: 'o1',
-                            objectIdBase: 'o1',
-                            settings: {
-                                base: { joinDiameter: 1.0 },
-                                tip: { diameter: 0.8, length: 2.0 },
-                            },
-                        },
-                        s_child_normal_hint: {
-                            id: 's_child_normal_hint',
-                            // Base endpoint is model-contact (has normal), so tip endpoint should attach to host.
-                            base: { x: 0.1, y: 0, z: 4.0 },
-                            tip: { x: 2.5, y: 0, z: 10.0 },
-                            baseNormal: { x: 0, y: 0, z: 1 },
-                            parentId: ['s_root'],
-                            objectIdTip: 'o1',
-                            objectIdBase: 'o1',
-                            settings: {
-                                base: { joinDiameter: 0.7 },
-                                tip: { diameter: 0.6, length: 2.0 },
-                            },
-                        },
-                    }
-                }
-            }
-        };
-
-        const result = LysConverter.convert(NORMAL_INFERRED_ENDPOINT_DATA, createDefaultSettings());
-        assert.strictEqual(result.branches.length, 1, 'Expected one branch from single-parent support');
-
-        const branch = result.branches[0];
-        assert.ok(branch.contactCone, 'Expected branch to include contact cone');
-
-        // Base endpoint has the valid normal, so it should remain the model-contact tip.
-        assert.ok(Math.abs(branch.contactCone!.pos.x - 0.1) < 1e-6, 'Contact cone X should follow normal-designated tip endpoint');
-        assert.ok(Math.abs(branch.contactCone!.pos.z - 4.0) < 1e-6, 'Contact cone Z should follow normal-designated tip endpoint');
-    });
-
     it('should convert grounded single-parent supports with explicit parent hint into kickstands', () => {
         const SUPPORT_BRACE_DATA = {
             objects: {
@@ -662,78 +603,15 @@ describe('LysConverter', () => {
             'Imported brace start knot should be marked for brace-uniform normalization');
         assert.strictEqual(endKnot._importHint, 'braceImported',
             'Imported brace end knot should be marked for brace-uniform normalization');
-        assert.ok(Math.abs((startKnot.diameter as number) - (endKnot.diameter as number)) < 1e-6,
-            'Imported brace host knots should start with a uniform joint diameter');
-    });
-
-    it('should keep authored brace endpoint positions for inferred two-parent braces (no explicit endpoint hints)', () => {
-        const BRACE_NO_HINT_DATA = {
-            objects: {
-                present: {
-                    byId: {
-                        o1: {
-                            id: 'o1',
-                            formerCenter: { x: 0, y: 0, z: 0 },
-                            position: { x: 0, y: 0, z: 0 },
-                            rotation: { x: 0, y: 0, z: 0 },
-                            scale: { x: 1, y: 1, z: 1 },
-                        }
-                    }
-                }
-            },
-            supports: {
-                present: {
-                    byId: {
-                        s_root_a: {
-                            id: 's_root_a',
-                            base: { x: 0, y: 0, z: 0 },
-                            tip: { x: 0, y: 0, z: 20 },
-                            parentId: [],
-                            objectIdTip: 'o1',
-                            objectIdBase: 'o1',
-                            settings: { tip: { length: 3 } }
-                        },
-                        s_root_b: {
-                            id: 's_root_b',
-                            base: { x: 10, y: 0, z: 0 },
-                            tip: { x: 10, y: 0, z: 20 },
-                            parentId: [],
-                            objectIdTip: 'o1',
-                            objectIdBase: 'o1',
-                            settings: { tip: { length: 3 } }
-                        },
-                        s_brace_no_hint: {
-                            id: 's_brace_no_hint',
-                            type: 0,
-                            base: { x: 0, y: 0, z: 20 },
-                            tip: { x: 10, y: 0, z: 20 },
-                            parentId: ['s_root_a', 's_root_b'],
-                            parentBaseId: null,
-                            parentTipId: null,
-                            objectIdTip: 'o1',
-                            objectIdBase: 'o1',
-                            settings: { base: { joinDiameter: 0.5 } }
-                        }
-                    }
-                }
-            }
-        };
-
-        const result = LysConverter.convert(BRACE_NO_HINT_DATA, createDefaultSettings());
-        assert.strictEqual(result.braces.length, 1, 'Expected one inferred two-parent brace');
-
-        const brace = result.braces[0];
-        const startKnot = result.knots.find(k => k.id === brace.startKnotId);
-        const endKnot = result.knots.find(k => k.id === brace.endKnotId);
-
-        assert.ok(startKnot, 'Brace start knot should exist');
-        assert.ok(endKnot, 'Brace end knot should exist');
-
-        const sortedByX = [startKnot!, endKnot!].sort((a, b) => a.pos.x - b.pos.x);
-        assert.ok(Math.abs(sortedByX[0].pos.x - 0) < 1e-6 && Math.abs(sortedByX[0].pos.z - 20) < 1e-6,
-            'First brace knot should keep authored base endpoint position (x=0,z=20)');
-        assert.ok(Math.abs(sortedByX[1].pos.x - 10) < 1e-6 && Math.abs(sortedByX[1].pos.z - 20) < 1e-6,
-            'Second brace knot should keep authored tip endpoint position (x=10,z=20)');
+        // A brace renders at its knots' diameters, so each knot is sized by the shaft
+        // it lands on: s1 authors a 1.2mm pillar, s3 authors none and takes the
+        // default, and the brace tapers between them.
+        const s1Knot = [startKnot, endKnot].find((k) => Math.abs(k.pos.x) < 1)!;
+        const s3Knot = [startKnot, endKnot].find((k) => Math.abs(k.pos.x - 20) < 1)!;
+        assert.ok(Math.abs((s1Knot.diameter as number) - (1.2 + 0.1)) < 1e-6,
+            'Brace knot on s1 should take the 1.2mm pillar joint diameter');
+        assert.ok(Math.abs((s3Knot.diameter as number) - (s1Knot.diameter as number)) > 1e-6,
+            'Brace knots on differently sized hosts should differ, so the brace tapers');
     });
 
     it('should keep authored brace endpoint positions when explicit parentBaseId/parentTipId are provided', () => {
@@ -898,182 +776,6 @@ describe('LysConverter', () => {
             'Stale-parent brace knots should resolve onto the askew host segments, not the near-vertical root stubs');
     });
 
-    it('should resolve first two valid brace hosts from misordered parentId arrays', () => {
-        const MISORDERED_BRACE_PARENT_DATA = {
-            objects: {
-                present: {
-                    byId: {
-                        o1: {
-                            id: 'o1',
-                            formerCenter: { x: 0, y: 0, z: 0 },
-                            position: { x: 0, y: 0, z: 0 },
-                            rotation: { x: 0, y: 0, z: 0 },
-                            scale: { x: 1, y: 1, z: 1 },
-                        }
-                    }
-                }
-            },
-            supports: {
-                present: {
-                    byId: {
-                        s_root_left: {
-                            id: 's_root_left',
-                            type: 1,
-                            base: { x: 0, y: 0, z: 0 },
-                            tip: { x: 4, y: 0, z: 20 },
-                            parentId: [],
-                            objectIdTip: 'o1',
-                            objectIdBase: 'o1',
-                            settings: { tip: { length: 3 } },
-                        },
-                        s_root_right: {
-                            id: 's_root_right',
-                            type: 1,
-                            base: { x: 20, y: 0, z: 0 },
-                            tip: { x: 16, y: 0, z: 20 },
-                            parentId: [],
-                            objectIdTip: 'o1',
-                            objectIdBase: 'o1',
-                            settings: { tip: { length: 3 } },
-                        },
-                        s_brace_misordered: {
-                            id: 's_brace_misordered',
-                            type: 0,
-                            base: { x: 2.8, y: 0, z: 16 },
-                            tip: { x: 17.2, y: 0, z: 16 },
-                            parentId: ['s_missing', 's_root_right', 's_root_left'],
-                            parentBaseId: null,
-                            parentTipId: null,
-                            objectIdTip: 'o1',
-                            objectIdBase: 'o1',
-                            settings: { base: { joinDiameter: 0.5 } },
-                        }
-                    }
-                }
-            }
-        };
-
-        const result = LysConverter.convert(MISORDERED_BRACE_PARENT_DATA, createDefaultSettings());
-        assert.strictEqual(result.braces.length, 1, 'Brace should import by resolving the first two valid hosts in a misordered parent list');
-
-        const brace = result.braces[0];
-        const startKnot = result.knots.find(k => k.id === brace.startKnotId);
-        const endKnot = result.knots.find(k => k.id === brace.endKnotId);
-
-        assert.ok(startKnot, 'Expected misordered-parent brace start knot to exist');
-        assert.ok(endKnot, 'Expected misordered-parent brace end knot to exist');
-
-        const hostedByKnownSegment = result.trunks.some(t => t.segments.some(seg => seg.id === startKnot!.parentShaftId || seg.id === endKnot!.parentShaftId))
-            || result.branches.some(b => b.segments.some(seg => seg.id === startKnot!.parentShaftId || seg.id === endKnot!.parentShaftId));
-        assert.ok(hostedByKnownSegment, 'Misordered-parent brace knots should resolve to real host segment IDs');
-
-        const sortedByX = [startKnot!, endKnot!].sort((a, b) => a.pos.x - b.pos.x);
-        assert.ok(Math.abs(sortedByX[0].pos.x - 2.8) < 1e-6 && Math.abs(sortedByX[1].pos.x - 17.2) < 1e-6,
-            'Misordered-parent brace should keep authored endpoint mapping after host resolution');
-    });
-
-    it('should choose the best brace host pair when parentId contains extra valid hosts', () => {
-        const EXTRA_HOST_BRACE_PARENT_DATA = {
-            objects: {
-                present: {
-                    byId: {
-                        o1: {
-                            id: 'o1',
-                            formerCenter: { x: 0, y: 0, z: 0 },
-                            position: { x: 0, y: 0, z: 0 },
-                            rotation: { x: 0, y: 0, z: 0 },
-                            scale: { x: 1, y: 1, z: 1 },
-                        }
-                    }
-                }
-            },
-            supports: {
-                present: {
-                    byId: {
-                        s_root_left: {
-                            id: 's_root_left',
-                            type: 1,
-                            base: { x: 0, y: 0, z: 0 },
-                            tip: { x: 4, y: 0, z: 20 },
-                            parentId: [],
-                            objectIdTip: 'o1',
-                            objectIdBase: 'o1',
-                            settings: { tip: { length: 3 } },
-                        },
-                        s_root_center: {
-                            id: 's_root_center',
-                            type: 1,
-                            base: { x: 10, y: 0, z: 0 },
-                            tip: { x: 10, y: 0, z: 20 },
-                            parentId: [],
-                            objectIdTip: 'o1',
-                            objectIdBase: 'o1',
-                            settings: { tip: { length: 3 } },
-                        },
-                        s_root_right: {
-                            id: 's_root_right',
-                            type: 1,
-                            base: { x: 20, y: 0, z: 0 },
-                            tip: { x: 16, y: 0, z: 20 },
-                            parentId: [],
-                            objectIdTip: 'o1',
-                            objectIdBase: 'o1',
-                            settings: { tip: { length: 3 } },
-                        },
-                        s_brace_extra_host: {
-                            id: 's_brace_extra_host',
-                            type: 0,
-                            base: { x: 2.8, y: 0, z: 16 },
-                            tip: { x: 17.2, y: 0, z: 16 },
-                            // Includes an extra *valid* center host first; importer should still
-                            // choose left+right by best geometric pairing.
-                            parentId: ['s_root_center', 's_root_left', 's_root_right'],
-                            parentBaseId: null,
-                            parentTipId: null,
-                            objectIdTip: 'o1',
-                            objectIdBase: 'o1',
-                            settings: { base: { joinDiameter: 0.5 } },
-                        },
-                    }
-                }
-            }
-        };
-
-        const result = LysConverter.convert(EXTRA_HOST_BRACE_PARENT_DATA, createDefaultSettings());
-        assert.strictEqual(result.braces.length, 1, 'Expected one brace from parent list with extra valid host');
-        assert.strictEqual(result.trunks.length, 3, 'Expected three candidate host trunks');
-
-        const brace = result.braces[0];
-        const startKnot = result.knots.find(k => k.id === brace.startKnotId);
-        const endKnot = result.knots.find(k => k.id === brace.endKnotId);
-        assert.ok(startKnot && endKnot, 'Expected brace host knots to exist');
-
-        const rootsById = new Map(result.roots.map((root) => [root.id, root] as const));
-        const trunksByRootX = result.trunks
-            .map((trunk) => ({
-                trunk,
-                rootX: rootsById.get(trunk.rootId)?.transform.pos.x ?? Number.NaN,
-            }))
-            .sort((a, b) => a.rootX - b.rootX);
-
-        const leftTrunk = trunksByRootX[0].trunk;
-        const centerTrunk = trunksByRootX[1].trunk;
-        const rightTrunk = trunksByRootX[2].trunk;
-
-        const leftSegmentIds = new Set(leftTrunk.segments.map((segment) => segment.id));
-        const centerSegmentIds = new Set(centerTrunk.segments.map((segment) => segment.id));
-        const rightSegmentIds = new Set(rightTrunk.segments.map((segment) => segment.id));
-
-        const knotSegmentIds = [startKnot!.parentShaftId, endKnot!.parentShaftId];
-
-        assert.ok(knotSegmentIds.some((segmentId) => leftSegmentIds.has(segmentId)),
-            'Brace should attach to left trunk when extra valid hosts exist');
-        assert.ok(knotSegmentIds.some((segmentId) => rightSegmentIds.has(segmentId)),
-            'Brace should attach to right trunk when extra valid hosts exist');
-        assert.ok(knotSegmentIds.every((segmentId) => !centerSegmentIds.has(segmentId)),
-            'Brace should not bind to center trunk just because it appears first in parentId list');
-    });
-
     it('should bind braces to tip-side host segments when closest projection is a far endpoint clamp', () => {
         const ENDPOINT_CLAMP_BRACE_DATA = {
             objects: {
@@ -1200,7 +902,7 @@ describe('LysConverter', () => {
             settings: {
                 tip: { length: 2.0 } // Cone is 2mm long. Distance (0.1) < 2.0 -> Leaf
             },
-            parentId: ['s1']
+            parentBaseId: 's1'
         };
 
         const result = LysConverter.convert(MOCK_LEAF_DATA, createDefaultSettings());
@@ -1256,7 +958,7 @@ describe('LysConverter', () => {
                         // them. Without it this fixture exercised a shape the
                         // slicer does not write.
                         tipNormal: { x: 0.894, y: 0, z: 0.447 },
-                        parentId: ['s_root'],
+                        parentBaseId: 's_root',
                         objectIdTip: 'o1',
                         objectIdBase: 'o1',
                         settings: {
@@ -1339,7 +1041,7 @@ describe('LysConverter', () => {
                             isBaseTip: true,
                             base: { x: 0, y: 0, z: 8 },
                             tip: { x: 3, y: 0, z: 10 },
-                            parentId: ['s_root'],
+                            parentBaseId: 's_root',
                             objectIdTip: 'o1',
                             objectIdBase: 'o1',
                             settings: {
@@ -1398,7 +1100,7 @@ describe('LysConverter', () => {
                             mini: true,
                             base: { x: 0, y: 0, z: 8 },
                             tip: { x: 3, y: 0, z: 10 },
-                            parentId: ['s_root'],
+                            parentBaseId: 's_root',
                             objectIdTip: 'o1',
                             objectIdBase: 'o1',
                             settings: {
@@ -1411,7 +1113,7 @@ describe('LysConverter', () => {
                             mini: false,
                             base: { x: 3, y: 0, z: 10.2 },
                             tip: { x: 8, y: 0, z: 16 },
-                            parentId: ['s_mini_parent'],
+                            parentBaseId: 's_mini_parent',
                             objectIdTip: 'o1',
                             objectIdBase: 'o1',
                             settings: {

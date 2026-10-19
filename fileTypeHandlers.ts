@@ -1,10 +1,12 @@
 import * as THREE from 'three';
 import type { PluginFileTypeHandler } from '@/features/plugins/pluginFileTypeBridge';
 import type { ModelMeshModifiers } from '@/features/mesh-modifiers/types';
-import type { DragonfruitImportFormat, Joint } from '@/supports/types';
+import type { DragonfruitImportFormat } from '@/supports/types';
 import { LysParser } from './LysParser';
 import type { LysData, LysObject, LysSupport } from './converter/types';
 import { LysConverter } from './LysConverter';
+import { normLysObjectId } from './converter/helpers';
+import { visitSupportGeometry } from './converter/supportTraversal';
 import { createDefaultSettings } from '@/supports/Settings/types';
 import { computeLowestZ } from '@/utils/geometry';
 import { eulerFromGlobalEuler, quaternionFromGlobalEulerDegrees } from '@/utils/rotation';
@@ -37,6 +39,8 @@ export type LysImportPayload = {
   supportData: ReturnType<typeof LysConverter.convert> | null;
   /** Hollowing configuration and hole punches extracted from LYS scene data. */
   meshModifiers?: ModelMeshModifiers;
+  /** The geometry is model-only; supports arrive separately in supportData. */
+  skipClassification: true;
 };
 
 // ---------------------------------------------------------------------------
@@ -60,84 +64,7 @@ function normalizeLysRotation(
  */
 function applySupportZOffset(importData: DragonfruitImportFormat | null | undefined, deltaZ: number) {
   if (!importData || !Number.isFinite(deltaZ) || Math.abs(deltaZ) < 1e-6) return;
-
-  const shiftedJointIds = new Set<string>();
-  const shiftJoint = (joint: Joint | null | undefined) => {
-    if (!joint?.pos) return;
-    const key = typeof joint.id === 'string' ? joint.id : null;
-    if (key && shiftedJointIds.has(key)) return;
-    joint.pos.z += deltaZ;
-    if (key) shiftedJointIds.add(key);
-  };
-
-  for (const trunk of importData.trunks || []) {
-    for (const seg of trunk?.segments || []) {
-      shiftJoint(seg?.bottomJoint);
-      shiftJoint(seg?.topJoint);
-      if (seg?.type === 'bezier') {
-        if (seg.controlPoint1) seg.controlPoint1.z += deltaZ;
-        if (seg.controlPoint2) seg.controlPoint2.z += deltaZ;
-      }
-    }
-    if (trunk?.contactCone?.pos) trunk.contactCone.pos.z += deltaZ;
-  }
-
-  for (const branch of importData.branches || []) {
-    for (const seg of branch?.segments || []) {
-      shiftJoint(seg?.bottomJoint);
-      shiftJoint(seg?.topJoint);
-      if (seg?.type === 'bezier') {
-        if (seg.controlPoint1) seg.controlPoint1.z += deltaZ;
-        if (seg.controlPoint2) seg.controlPoint2.z += deltaZ;
-      }
-    }
-    if (branch?.contactCone?.pos) branch.contactCone.pos.z += deltaZ;
-  }
-
-  for (const leaf of importData.leaves || []) {
-    if (leaf?.contactCone?.pos) leaf.contactCone.pos.z += deltaZ;
-  }
-
-  for (const twig of importData.twigs || []) {
-    for (const seg of twig?.segments || []) {
-      shiftJoint(seg?.bottomJoint);
-      shiftJoint(seg?.topJoint);
-      if (seg?.type === 'bezier') {
-        if (seg.controlPoint1) seg.controlPoint1.z += deltaZ;
-        if (seg.controlPoint2) seg.controlPoint2.z += deltaZ;
-      }
-    }
-    if (twig?.contactDiskA?.pos) twig.contactDiskA.pos.z += deltaZ;
-    if (twig?.contactDiskB?.pos) twig.contactDiskB.pos.z += deltaZ;
-  }
-
-  for (const stick of importData.sticks || []) {
-    for (const seg of stick?.segments || []) {
-      shiftJoint(seg?.bottomJoint);
-      shiftJoint(seg?.topJoint);
-      if (seg?.type === 'bezier') {
-        if (seg.controlPoint1) seg.controlPoint1.z += deltaZ;
-        if (seg.controlPoint2) seg.controlPoint2.z += deltaZ;
-      }
-    }
-    if (stick?.contactConeA?.pos) stick.contactConeA.pos.z += deltaZ;
-    if (stick?.contactConeB?.pos) stick.contactConeB.pos.z += deltaZ;
-  }
-
-  for (const knot of importData.knots || []) {
-    if (knot?.pos) knot.pos.z += deltaZ;
-  }
-
-  // Kickstands bundle their own root and host knot rather than filing them in
-  // `roots`/`knots`, so they are shifted here or not at all.
-  for (const build of importData.kickstands || []) {
-    for (const seg of build?.kickstand?.segments || []) {
-      shiftJoint(seg?.bottomJoint);
-      shiftJoint(seg?.topJoint);
-    }
-    if (build?.root?.transform?.pos) build.root.transform.pos.z += deltaZ;
-    if (build?.hostKnot?.pos) build.hostKnot.pos.z += deltaZ;
-  }
+  visitSupportGeometry(importData, { position: (pos) => { pos.z += deltaZ; } });
 }
 
 function summarizeImportSupportData(importData: ReturnType<typeof LysConverter.convert> | null | undefined) {
@@ -307,13 +234,6 @@ export function resolveObjectGeometryMatch(
   return { geometry: null, matchSource: 'none' };
 }
 
-/** Normalize an LYS objectId field (may be string or number) to a string, or null. */
-function normLysObjectId(val: unknown): string | null {
-  if (typeof val === 'string' && val.trim()) return val.trim();
-  if (typeof val === 'number' && Number.isFinite(val)) return String(val);
-  return null;
-}
-
 /**
  * Build a map of { ownerObjectId → { supportId → support } } for all supports in the scene.
  * Uses `objectIdTip` / `objectIdBase` on the support. Falls back to `fallbackObjectId`.
@@ -360,6 +280,7 @@ function convertSingleObject(
   importCenterY: number,
   lysGeometriesByName: Map<string, THREE.BufferGeometry>,
   cavityGeometry?: THREE.BufferGeometry,
+  isLegacyGeometry?: boolean,
 ): LysImportPayload {
   // Stage 1: prepare filtered object-local scene payload.
   const importedModelId = uuidv4();
@@ -466,7 +387,7 @@ function convertSingleObject(
   });
 
   const meshModifiers = LysConverter.convertHollowing(
-    sceneDataForConvert, objGeometry, lysGeometriesByName, undefined,
+    sceneDataForConvert, objGeometry, lysGeometriesByName, isLegacyGeometry,
     { objectId: objId, cavityGeometry },
   );
   console.log('[lys-import][debug] convertSingleObject meshModifiers:', meshModifiers ? `hollowing=${!!meshModifiers.hollowing} holes=${meshModifiers.holePunches?.length ?? 0}` : 'undefined');
@@ -477,6 +398,7 @@ function convertSingleObject(
     transform,
     supportData: dragonfruitData,
     meshModifiers,
+    skipClassification: true,
   };
 }
 
@@ -513,6 +435,7 @@ export async function importLysFile(
       },
       supportData: null,
       meshModifiers: LysConverter.convertHollowing(data.sceneData, data.geometry, data.geometriesByName),
+      skipClassification: true,
     };
   }
 
@@ -530,12 +453,27 @@ export async function importLysFile(
     geometryKeys: [...data.geometriesByName.keys()],
   });
 
-  // Clone scene data and strip Z rotation for the converter (Z is applied post-conversion).
-  const sceneDataForConvert = JSON.parse(JSON.stringify(data.sceneData));
-  const convertObjects = sceneDataForConvert?.objects?.present?.byId ?? {};
-  for (const key of Object.keys(convertObjects)) {
-    convertObjects[key].rotation = normalizeLysRotation(convertObjects[key].rotation);
+  // Copy only what the converter mutates: the object records whose Z rotation
+  // is stripped for conversion (Z is applied to the whole model afterwards).
+  // A deep clone here copied every support and hole record in the file.
+  const sourceObjects = data.sceneData.objects?.present?.byId ?? {};
+  const convertObjects: Record<string, LysObject> = {};
+  for (const [key, object] of Object.entries(sourceObjects)) {
+    convertObjects[key] = {
+      ...object,
+      rotation: normalizeLysRotation(object.rotation),
+    };
   }
+  const sceneDataForConvert: LysData = {
+    ...data.sceneData,
+    objects: {
+      ...data.sceneData.objects,
+      present: {
+        ...data.sceneData.objects?.present,
+        byId: convertObjects,
+      },
+    },
+  };
 
   // Resolve object->geometry mapping, including heuristic fallbacks.
   const objectsWithGeometry: Array<{
@@ -612,230 +550,68 @@ export async function importLysFile(
   }
 
   // -----------------------------------------------------------------------
-  // Multi-model path: each object gets an independent payload.
+  // One payload per object, whatever the count. A scene whose geometry never
+  // matched by name still converts: the whole blob becomes one object, chosen
+  // below, so there is a single conversion path to keep correct.
   // -----------------------------------------------------------------------
-  if (objectsWithGeometry.length > 1) {
-    console.log('[lys-import][debug] entering multi-model import path', {
-      modelCount: objectsWithGeometry.length,
-      modelIds: objectsWithGeometry.map((o) => o.id),
-    });
+  const targets = objectsWithGeometry.length > 0
+    ? objectsWithGeometry
+    : (() => {
+      // Nothing matched by name. The first object carrying supports is the model,
+      // falling back to the first object at all, and it takes the whole blob.
+      const fallbackId = Object.keys(objects).find((key) => (objects[key].supportsBase?.length ?? 0) > 0)
+        ?? Object.keys(objects)[0];
+      if (!fallbackId) return [];
+      console.log(`[lys-import] No named geometry matched; converting ${fallbackId} against the whole blob`);
+      return [{
+        id: fallbackId,
+        obj: objects[fallbackId],
+        geometry: data.geometry,
+        matchKey: undefined as string | undefined,
+        matchSource: 'unmatched-whole-blob' as const,
+      }];
+    })();
 
-    const objectIds = new Set(objectsWithGeometry.map((o) => o.id));
-    const fallbackId = objectsWithGeometry[0].id;
-    const supportsByOwner = buildSupportsByOwner(supports, objectIds, fallbackId);
-
-    const payloads: LysImportPayload[] = [];
-    for (const { id: objId, obj, geometry: objGeom, matchKey } of objectsWithGeometry) {
-      const supportsForObj = supportsByOwner.get(objId) ?? {};
-      console.log(`[lys-import] Object ${objId}: ${Object.keys(supportsForObj).length} supports`);
-      // This object's own cavity mesh (Lychee names it `<geometry-stem>_hollowing`).
-      // Passed through so tilted-hole drill signs resolve against the right cavity.
-      const cavityGeometry = matchKey
-        ? data.geometriesByName.get(`${matchKey}_hollowing`)
-          ?? data.geometriesByName.get(`${matchKey.toLowerCase()}_hollowing`)
-        : undefined;
-      const payload = convertSingleObject(
-        objId, obj, objGeom, supportsForObj,
-        sceneDataForConvert, settings, 0, 0, // no center shift for multi-model
-        data.geometriesByName, cavityGeometry,
-      );
-      payloads.push(payload);
-    }
-
-    console.log('[lys-import][debug] multi-model payloads generated', {
-      payloadCount: payloads.length,
-      modelIds: payloads.map((p) => p.modelId),
-      supportSummaries: payloads.map((p) => ({ modelId: p.modelId, ...summarizeImportSupportData(p.supportData) })),
-    });
-
-    return payloads;
+  if (targets.length === 0) {
+    throw new Error('LYS import: no object to convert');
   }
 
-  console.log('[lys-import][debug] entering single-model import path', {
-    reason: objectsWithGeometry.length === 1
-      ? 'exactly_one_object_with_named_geometry'
-      : 'no_named_geometry_matches_found',
-    objectsWithGeometryCount: objectsWithGeometry.length,
+  console.log('[lys-import][debug] converting', {
+    modelCount: targets.length,
+    modelIds: targets.map((o) => o.id),
   });
 
-  // -----------------------------------------------------------------------
-  // Single-model path (legacy behavior compatibility branch).
-  // -----------------------------------------------------------------------
-  let targetObj: LysObject | null = null;
-  let targetObjId: string | null = null;
+  const objectIds = new Set(targets.map((o) => o.id));
+  const supportsByOwner = buildSupportsByOwner(supports, objectIds, targets[0].id);
 
-  if (objectsWithGeometry.length === 1) {
-    targetObj = objectsWithGeometry[0].obj;
-    targetObjId = objectsWithGeometry[0].id;
-  } else {
-    // No named geometry found — fall back to largest blob + first supported object
-    targetObjId = 'o15';
-    targetObj = objects['o15'] ?? null;
-    if (!targetObj) {
-      for (const key in objects) {
-        if ((objects[key].supportsBase?.length ?? 0) > 0) {
-          targetObj = objects[key];
-          targetObjId = key;
-          break;
-        }
-      }
-    }
-    if (!targetObj) {
-      const firstKey = Object.keys(objects)[0];
-      if (firstKey) {
-        targetObj = objects[firstKey];
-        targetObjId = firstKey;
-        console.log(`[lys-import] Fallback to first object: ${firstKey}`);
-      }
-    }
+  const payloads: LysImportPayload[] = [];
+  for (const { id: objId, obj, geometry: objGeom, matchKey } of targets) {
+    const supportsForObj = supportsByOwner.get(objId) ?? {};
+    console.log(`[lys-import] Object ${objId}: ${Object.keys(supportsForObj).length} supports`);
+    // This object's own cavity mesh (Lychee names it `<geometry-stem>_hollowing`).
+    // Passed through so tilted-hole drill signs resolve against the right cavity.
+    const cavityGeometry = matchKey
+      ? data.geometriesByName.get(`${matchKey}_hollowing`)
+        ?? data.geometriesByName.get(`${matchKey.toLowerCase()}_hollowing`)
+      : undefined;
+    payloads.push(convertSingleObject(
+      objId, obj, objGeom, supportsForObj,
+      sceneDataForConvert, settings,
+      // A multi-object scene lays its models out by their own positions, so only
+      // a lone model takes the caller's centre.
+      targets.length === 1 ? importCenterX : 0,
+      targets.length === 1 ? importCenterY : 0,
+      data.geometriesByName, cavityGeometry, data.isLegacyGeometry,
+    ));
   }
 
-  const singleGeom =
-    (targetObjId ? data.geometriesByName.get(targetObjId) ?? data.geometriesByName.get(targetObjId.toLowerCase()) : null)
-    ?? data.geometry;
-
-  // The stem `singleGeom` was found under, so its `_hollowing` sibling can be
-  // resolved the same way the multi-model path resolves each object's.
-  const singleMatchKey = objectsWithGeometry.length === 1
-    ? objectsWithGeometry[0].matchKey
-    : undefined;
-
-  const importedModelId = uuidv4();
-  let resolvedModelZ: number | null = null;
-  const transform = {
-    position: new THREE.Vector3(0, 0, 0),
-    rotation: new THREE.Euler(0, 0, 0),
-    scale: new THREE.Vector3(1, 1, 1),
-  };
-
-  let raycastMesh: THREE.Mesh | undefined;
-  let ghostMaterial: THREE.Material | undefined;
-  if (targetObj) {
-    const center = targetObj.formerCenter ?? targetObj.center ?? { x: 0, y: 0, z: 0 };
-    const position = targetObj.position ?? { x: 0, y: 0, z: 0 };
-    const scale = targetObj.scale ?? { x: 1, y: 1, z: 1 };
-    const rot = normalizeLysRotation(targetObj.rotation);
-    const objectQuaternion = quaternionFromGlobalEulerDegrees(rot);
-
-    const ghostGroup = new THREE.Group();
-    ghostGroup.position.set(0, 0, position.z);
-    ghostGroup.scale.set(scale.x, scale.y, scale.z);
-    ghostGroup.quaternion.copy(objectQuaternion);
-
-    ghostMaterial = new THREE.MeshBasicMaterial({ side: THREE.DoubleSide });
-    const mesh = new THREE.Mesh(singleGeom, ghostMaterial);
-    mesh.position.set(-center.x, -center.y, -center.z);
-
-    ghostGroup.add(mesh);
-    ghostGroup.updateMatrixWorld(true);
-    mesh.geometry.computeBoundingSphere();
-    raycastMesh = mesh;
-  }
-
-  const dragonfruitData = LysConverter.convert(sceneDataForConvert, settings, raycastMesh);
-
-  if (targetObj && dragonfruitData) {
-    const position = targetObj.position ?? { x: 0, y: 0, z: 0 };
-    const scale = targetObj.scale ?? { x: 1, y: 1, z: 1 };
-    const rot = normalizeLysRotation(targetObj.rotation);
-    const objectQuaternion = quaternionFromGlobalEulerDegrees(rot);
-
-    singleGeom.computeBoundingBox();
-    const bbox = singleGeom.boundingBox;
-    if (bbox) {
-      const geomCenter = bbox.getCenter(new THREE.Vector3());
-      const rotationScale = new THREE.Matrix4().compose(
-        new THREE.Vector3(0, 0, 0),
-        objectQuaternion,
-        new THREE.Vector3(scale.x || 1, scale.y || 1, scale.z || 1),
-      );
-      const centerOffset = new THREE.Matrix4().makeTranslation(-geomCenter.x, -geomCenter.y, -geomCenter.z);
-      const localTransform = rotationScale.clone().multiply(centerOffset);
-
-      const lysLiftZ = Number.isFinite(position.z) ? position.z : 0;
-      const transformedMinZ = computeLowestZ(singleGeom, localTransform);
-      const finalModelZ = lysLiftZ - transformedMinZ;
-      resolvedModelZ = finalModelZ;
-      const supportDeltaZ = finalModelZ - lysLiftZ;
-
-      if (Number.isFinite(supportDeltaZ) && Math.abs(supportDeltaZ) > 1e-6) {
-        applySupportZOffset(dragonfruitData, supportDeltaZ);
-        console.log(`[lys-import] Applied support Z offset: ${supportDeltaZ.toFixed(3)}mm`);
-      }
-    }
-  }
-
-  if (dragonfruitData) {
-    LysConverter.reassignModelId(dragonfruitData, importedModelId);
-
-    const objPos = targetObj?.position ?? { x: 0, y: 0, z: 0 };
-    const rotZDeg = Number.isFinite(targetObj?.rotation?.z) ? (targetObj!.rotation!.z as number) : 0;
-    if (Math.abs(rotZDeg) > 1e-6) {
-      LysConverter.applyZRotation(dragonfruitData, objPos.x, objPos.y, rotZDeg * Math.PI / 180);
-      console.log(`[lys-import] Applied Z rotation: ${rotZDeg.toFixed(3)}°`);
-    }
-
-    if (Math.abs(importCenterX) > 1e-6 || Math.abs(importCenterY) > 1e-6) {
-      LysConverter.applyWorldXYPlacement(dragonfruitData, importCenterX, importCenterY);
-    }
-  }
-
-  if (ghostMaterial) ghostMaterial.dispose();
-
-  if (targetObj) {
-    const finalModelZ = Number.isFinite(resolvedModelZ)
-      ? (resolvedModelZ as number)
-      : (targetObj.position?.z ?? 0);
-
-    transform.position.set(
-      (targetObj.position?.x ?? 0) + importCenterX,
-      (targetObj.position?.y ?? 0) + importCenterY,
-      finalModelZ,
-    );
-
-    if (targetObj.rotation) {
-      const rXY = normalizeLysRotation(targetObj.rotation);
-      const rotZDeg = Number.isFinite(targetObj.rotation.z) ? (targetObj.rotation.z as number) : 0;
-      transform.rotation.copy(eulerFromGlobalEuler({
-        x: rXY.x * Math.PI / 180,
-        y: rXY.y * Math.PI / 180,
-        z: rotZDeg * Math.PI / 180,
-      }));
-    }
-
-    if (targetObj.scale) {
-      transform.scale.set(targetObj.scale.x, targetObj.scale.y, targetObj.scale.z);
-    }
-  }
-
-  // Scoped to this object, as the multi-model path is: the geometry's own
-  // `_hollowing` blob is its cavity, and the host decides whether to bake it.
-  const singleCavityGeometry = singleMatchKey
-    ? data.geometriesByName.get(`${singleMatchKey}_hollowing`)
-      ?? data.geometriesByName.get(`${singleMatchKey.toLowerCase()}_hollowing`)
-    : undefined;
-
-  const finalMeshModifiers = LysConverter.convertHollowing(
-    sceneDataForConvert, singleGeom, data.geometriesByName, data.isLegacyGeometry,
-    // No target id means no named geometry matched, so the whole scene is the
-    // model and the unscoped lookup is the right one.
-    targetObjId ? { objectId: targetObjId, cavityGeometry: singleCavityGeometry } : undefined,
-  );
-  console.log('[lys-import][debug] single-model meshModifiers:', finalMeshModifiers ? `hollowing=${!!finalMeshModifiers.hollowing} holes=${finalMeshModifiers.holePunches?.length ?? 0}` : 'undefined');
-
-  console.log('[lys-import][debug] single-model payload generated', {
-    targetObjId,
-    importedModelId,
-    supportSummary: summarizeImportSupportData(dragonfruitData),
+  console.log('[lys-import][debug] payloads generated', {
+    payloadCount: payloads.length,
+    modelIds: payloads.map((p) => p.modelId),
+    supportSummaries: payloads.map((p) => ({ modelId: p.modelId, ...summarizeImportSupportData(p.supportData) })),
   });
 
-  return {
-    modelId: importedModelId,
-    geometry: singleGeom,
-    transform,
-    supportData: dragonfruitData,
-    meshModifiers: finalMeshModifiers,
-  };
+  return payloads.length === 1 ? payloads[0] : payloads;
 }
 // ---------------------------------------------------------------------------
 // Plugin file-type handler (required export for fileType capability)
