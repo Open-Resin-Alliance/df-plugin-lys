@@ -261,3 +261,38 @@ describe('LysParser.parse - geometryOrder', () => {
       'Stems whose binary payload cannot be parsed should not appear in geometryOrder');
   });
 });
+
+describe('LysParser.parseLegacyGeometry with a triangle-count header', () => {
+  // The first triangles of a real legacy blob ([u32 count][V0, V1, V2, normal] × count).
+  // Without the count, the offset probe scores byte 8 above byte 4 and reads every
+  // vertex one float late, scrambling the whole mesh.
+  const RAW = [
+    [-0.905, 0.206, -11.061, -0.945, 0.852, -10.939, -0.937, 0.73, -10.987, 0.9981, 0.0584, 0.018],
+    [-1.107, 1.652, -10.859, -1.111, 1.682, -10.867, -1.105, 1.662, -10.871, 0.9208, 0.2105, 0.3284],
+    [-0.937, 0.73, -10.987, -0.919, 0.458, -11.047, -0.905, 0.206, -11.061, 0.9966, 0.0518, 0.0641],
+    [-1.105, 1.662, -10.871, -1.085, 1.578, -10.883, -1.055, 1.466, -10.887, 0.9307, 0.2585, -0.2586],
+  ];
+
+  function buildCountedBlob(): ArrayBuffer {
+    const buffer = new ArrayBuffer(4 + RAW.length * 48);
+    const view = new DataView(buffer);
+    view.setUint32(0, RAW.length, true);
+    RAW.flat().forEach((f, i) => view.setFloat32(4 + i * 4, f, true));
+    return buffer;
+  }
+
+  it('reads vertices from just after the count', () => {
+    const positions = parserInternals.parseLegacyGeometry(buildCountedBlob())
+      .getAttribute('position').array as Float32Array;
+    assert.strictEqual(positions.length, RAW.length * 9);
+    for (let t = 0; t < RAW.length; t++) {
+      for (let v = 0; v < 3; v++) {
+        const [x, y, z] = RAW[t].slice(v * 3, v * 3 + 3);
+        const got = Array.from(positions.subarray(t * 9 + v * 3, t * 9 + v * 3 + 3));
+        // X↔Z swap, as for every legacy blob.
+        [z, y, x].forEach((want, a) =>
+          assert.ok(Math.abs(got[a] - want) < 1e-4, `tri ${t} vert ${v}: expected ${[z, y, x]}, got ${got}`));
+      }
+    }
+  });
+});
