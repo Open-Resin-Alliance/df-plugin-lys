@@ -495,6 +495,14 @@ export class LysParser {
     private static parseLegacyGeometry(buffer: ArrayBuffer): THREE.BufferGeometry {
         const view = new DataView(buffer);
 
+        // --- Step 0: a leading triangle count that sizes the blob exactly ---
+        // Blobs written as [u32 count][V0, V1, V2, Attr] × count say where the data
+        // starts. The probe below can't tell byte 4 from byte 8 there (one float late
+        // still shows the stride pattern), and picking 8 scrambles every vertex.
+        const LEGACY_STRIDE = 48;
+        const headerTriCount = buffer.byteLength >= 4 ? view.getUint32(0, true) : 0;
+        const countedBlob = headerTriCount > 0 && 4 + headerTriCount * LEGACY_STRIDE === buffer.byteLength;
+
         // --- Step 1: find best starting offset for vertex data ---
         // Score every plausible offset by how strongly it shows the [V,V,V,Attr]
         // stride-48 XY pattern (ratio of avgVertXY / avgAttrXY). The true data start
@@ -507,7 +515,12 @@ export class LysParser {
         let bestStrideScore = 0;
         let firstValidOffset = -1;
 
-        for (const H of candidateOffsets) {
+        if (countedBlob) {
+            dataOffset = 4;
+            bestStrideScore = Infinity;
+        }
+
+        for (const H of countedBlob ? [] : candidateOffsets) {
             if (H >= buffer.byteLength) continue;
             const n = Math.floor((buffer.byteLength - H) / 12);
             if (n < 3) continue;
