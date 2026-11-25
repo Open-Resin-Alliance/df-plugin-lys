@@ -29,6 +29,8 @@ import { v4 as uuidv4 } from 'uuid';
  */
 export type LysImportPayload = {
   modelId: string;
+  /** The LYS object's own name; omitted when it has none. */
+  objName?: string;
   geometry: THREE.BufferGeometry;
   transform: {
     position: THREE.Vector3;
@@ -394,6 +396,7 @@ function convertSingleObject(
 
   return {
     modelId: importedModelId,
+    objName: typeof rawObj.name === 'string' ? rawObj.name.trim() || undefined : undefined,
     geometry: objGeometry,
     transform,
     supportData: dragonfruitData,
